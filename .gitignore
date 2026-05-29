@@ -1,0 +1,27 @@
+# .gitignore — JRS Agente MCP
+ 
+# Credenciales y secretos — JAMÁS subir a GitHub
+.env
+credentials.json
+token.json
+client_secret_*.json
+*.pem
+*.key
+ 
+# Carpetas de Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+ 
+# VS Code
+.vscode/
+ 
+# Logs y datos temporales
+*.log
+logs/
+tmp/
+ 
+# Sistema operativo
+.DS_Store
+Thumbs.db
