@@ -9,6 +9,12 @@ import logging
 from datetime import datetime
 from dotenv import load_dotenv
 import anthropic
+import base64
+import re
+from email.mime.text import MIMEText
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
 
 from whitelist import verify_sender
 from tools import (
@@ -220,12 +226,6 @@ def ejecutar_herramienta(nombre: str, parametros: dict) -> str:
     Recibe el nombre de una herramienta y sus parametros,
     ejecuta la logica correspondiente, y devuelve el resultado como string JSON.
     """
-    import base64
-    import re
-    from email.mime.text import MIMEText
-    from google.auth.transport.requests import Request
-    from google.oauth2.credentials import Credentials
-    from googleapiclient.discovery import build
 
     SCOPES = [
         'https://www.googleapis.com/auth/gmail.modify',
