@@ -38,6 +38,18 @@ WHITELIST = {
         "can_approve_external": False,
         "tone": "professor-alumno, pedagógico",
     },
+    "emmanuel@jrsretailservices.com": {
+        "name": "Emmanuel",
+        "role": "Technical Owner",
+        "can_approve_external": False,
+        "tone": "professor-alumno, pedagógico",
+    },
+    "projects@jrsretailservices.com": {
+        "name": "JRS Projects",
+        "role": "Operations Hub",
+        "can_approve_external": False,
+        "tone": "operacional, neutral",
+    },
 }
  
 def _normalizar_email(raw: str) -> str:
