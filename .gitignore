@@ -25,3 +25,7 @@ tmp/
 # Sistema operativo
 .DS_Store
 Thumbs.db
+
+# ChromaDB persistent storage (contains copyrighted material)
+chroma_data/
+*.chroma
