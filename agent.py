@@ -39,7 +39,7 @@ logger = logging.getLogger("jrs-agent")
 MAX_ITERATIONS_PER_EMAIL = 20
 SLEEP_BETWEEN_CYCLES_SECONDS = 300
 MAX_EMAILS_PER_CYCLE = 10
-MODELO = "claude-opus-4-5"
+MODELO = "claude-opus-4-8"
 
 # =====================================================
 # CARGAR EL SYSTEM PROMPT
