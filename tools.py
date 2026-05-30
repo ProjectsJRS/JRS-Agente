@@ -61,25 +61,47 @@ def obtener_id_etiqueta(service, nombre_etiqueta):
 
 
 def extraer_cuerpo_correo(payload):
-    if 'body' in payload and 'data' in payload['body'] and payload['body']['data']:
-        data = payload['body']['data']
+    """
+    Extrae el cuerpo en texto plano navegando recursivamente
+    la estructura MIME del correo.
+    Orden de preferencia: text/plain > text/html > (sin cuerpo)
+    """
+    # Caso 1: payload tiene data directo (correos simples sin partes)
+    data = payload.get('body', {}).get('data')
+    if data:
         return base64.urlsafe_b64decode(
             data.encode('UTF-8')).decode('utf-8', errors='ignore')
-    if 'parts' in payload:
-        for parte in payload['parts']:
-            if parte.get('mimeType') == 'text/plain':
-                data = parte['body'].get('data')
-                if data:
-                    return base64.urlsafe_b64decode(
-                        data.encode('UTF-8')).decode('utf-8', errors='ignore')
-        for parte in payload['parts']:
-            if parte.get('mimeType') == 'text/html':
-                data = parte['body'].get('data')
-                if data:
-                    return base64.urlsafe_b64decode(
-                        data.encode('UTF-8')).decode('utf-8', errors='ignore')
-    return '(sin cuerpo)'
 
+    # Caso 2: multipart — buscar recursivamente en las partes
+    partes = payload.get('parts', [])
+
+    # Primer intento: text/plain en cualquier nivel
+    for parte in partes:
+        if parte.get('mimeType') == 'text/plain':
+            data = parte.get('body', {}).get('data')
+            if data:
+                return base64.urlsafe_b64decode(
+                    data.encode('UTF-8')).decode('utf-8', errors='ignore')
+        # Si la parte es multipart anidada, entrar recursivamente
+        if parte.get('mimeType', '').startswith('multipart/'):
+            resultado = extraer_cuerpo_correo(parte)
+            if resultado and resultado != '(sin cuerpo)':
+                return resultado
+
+    # Segundo intento: text/html como respaldo
+    for parte in partes:
+        if parte.get('mimeType') == 'text/html':
+            data = parte.get('body', {}).get('data')
+            if data:
+                import re
+                texto_html = base64.urlsafe_b64decode(
+                    data.encode('UTF-8')).decode('utf-8', errors='ignore')
+                texto = re.sub(r'<br\s*/?>', '\n', texto_html)
+                texto = re.sub(r'</div>', '\n', texto)
+                texto = re.sub(r'<[^>]+>', '', texto)
+                return texto.strip()
+
+    return '(sin cuerpo)'
 
 # =====================================================
 # HERRAMIENTA 1: read_tagged_emails
