@@ -413,7 +413,7 @@ def procesar_un_correo(correo: dict) -> dict:
 
             respuesta = cliente.messages.create(
                 model=MODELO,
-                max_tokens=4096,
+                max_tokens=8192,
                 system=SYSTEM_PROMPT,
                 tools=TOOLS_DEFINITION,
                 messages=messages,
@@ -486,8 +486,8 @@ async def main():
 
             if not correos:
                 logger.info("No hay correos pendientes en este ciclo.")
-            else:
-                logger.info(f"{len(correos)} correo(s) por procesar.")
+            elif len(correos) == MAX_EMAILS_PER_CYCLE:
+                logger.info(f"{len(correos)} correo(s) procesados. Puede haber más en cola — se procesarán en el siguiente ciclo.")
                 for correo in correos:
                     resultado = procesar_un_correo(correo)
                     logger.info(f"Resultado: {resultado}")

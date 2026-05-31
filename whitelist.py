@@ -2,7 +2,8 @@
 # Sistema de verificación de remitentes autorizados
  
 import re
-from typing import Dict
+import logging
+from typing import Dict, Any
  
 # =====================================================
 # LA WHITELIST OFICIAL — no modificar sin orden de Richard
@@ -62,7 +63,7 @@ def _normalizar_email(raw: str) -> str:
         return match.group(1).strip().lower()
     return raw
  
-def verify_sender(sender_raw: str) -> Dict:
+def verify_sender(sender_raw: str) -> dict:
     """
     Verifica si un remitente está en la whitelist.
  
@@ -94,6 +95,9 @@ def verify_sender(sender_raw: str) -> Dict:
             razon = (
                 f"Match en whitelist por email, pero display name "
                 f"'{name_in_raw}' no coincide con esperado '{expected_name}'."
+            )
+            logging.getLogger("jrs-agent").warning(
+                f"[whitelist] Posible spoofing medium en '{email}': {razon}"
             )
         return {
             "is_internal": True,

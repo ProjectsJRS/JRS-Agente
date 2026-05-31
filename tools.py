@@ -16,6 +16,9 @@ from googleapiclient.discovery import build
 
 load_dotenv()
 
+import logging
+logger = logging.getLogger("jrs-agent")
+
 # =====================================================
 # CONSTANTES
 # =====================================================
@@ -354,7 +357,7 @@ def create_gmail_draft(
                 ).execute()
                 label_changed = True
         except Exception as e:
-            print(f"[WARN create_gmail_draft] no se cambió etiqueta: {e}")
+            logger.warning(f"[create_gmail_draft] no se cambió etiqueta: {e}")
 
         return {
             "draft_id": draft_id,
@@ -414,9 +417,9 @@ Action required from operations leadership.
                 ).execute()
                 enviados.append(destinatario)
             except Exception as e:
-                print(f"[ERROR alert_if_critical] envío a {destinatario}: {e}")
+                logger.error(f"[alert_if_critical] envío a {destinatario}: {e}")
     except Exception as e:
-        print(f"[ERROR alert_if_critical] conexión Gmail: {e}")
+        logger.error(f"[alert_if_critical] conexión Gmail: {e}")
 
     return {
         "alert_sent": len(enviados) > 0,

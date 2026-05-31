@@ -2,7 +2,7 @@
 # Owner Tecnico: Emmanuel
 print("Hola Mundo")
 print("Soy Emmanuel, Owner Tecnico de JRS Retail Services")
-print("Estoy construyendo el angente de operaciones")
+print("Estoy construyendo el agente de operaciones")
 #Practiquemos con variables
 mi_nombre = "Emmanuel"
 mi_rol = "Owner Tecnico"
