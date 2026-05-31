@@ -21,6 +21,14 @@ from tools import (
     obtener_servicio_gmail,
     obtener_id_etiqueta,
     extraer_cuerpo_correo,
+    classify_email,
+    search_drive,
+    generate_report,
+    create_gmail_draft,
+    alert_if_critical,
+    consult_building_code,
+    verify_compliance,
+    cite_applicable_standard,
 )
 from client_protocols import get_protocol
 
@@ -223,265 +231,90 @@ TOOLS_DEFINITION = [
 # =====================================================
 def ejecutar_herramienta(nombre: str, parametros: dict) -> str:
     """
-    Recibe el nombre de una herramienta y sus parametros,
-    ejecuta la logica correspondiente, y devuelve el resultado como string JSON.
+    Dispatcher: llama a la función correspondiente en tools.py
+    y devuelve el resultado como string JSON.
     """
-
-    SCOPES = [
-        'https://www.googleapis.com/auth/gmail.modify',
-        'https://www.googleapis.com/auth/gmail.compose',
-        'https://www.googleapis.com/auth/drive.readonly',
-    ]
-
-    if nombre == "classify_email":
-        subject = parametros.get("subject", "")
-        body = parametros.get("body", "")
-        sender = parametros.get("sender", "")
-        texto = f"{subject}\n{body}".lower()
-
-        clientes_conocidos = {
-            "lenscrafters": ["lenscrafters", "lens crafters"],
-            "lids": ["lids", "hat store"],
-            "target": ["target", "tgt store"],
-            "cvs": ["cvs pharmacy", "cvs"],
-            "sephora": ["sephora"],
-            "h&m": ["h&m", "h and m"],
-            "best buy": ["best buy", "bestbuy"],
-            "walgreens": ["walgreens"],
-            "sprouts": ["sprouts"],
-            "dollar tree": ["dollar tree"],
-        }
-
-        cliente_detectado = None
-        for cliente, keywords in clientes_conocidos.items():
-            for kw in keywords:
-                if kw in texto:
-                    cliente_detectado = cliente.title()
-                    break
-            if cliente_detectado:
-                break
-
-        categoria = "otro"
-        if any(s in texto for s in ["inspector", "city of", "building dept", "fire marshal"]):
-            categoria = "inspeccion"
-        elif any(s in texto for s in ["invoice", "po number", "purchase order", "net 30"]):
-            categoria = "vendor"
-        elif any(s in texto for s in ["crew", "job site", "foreman", "overnight", "buenas", "jefe", "terminamos"]):
-            categoria = "crew"
-        elif any(s in texto for s in ["project manager", "facilities", "punchlist"]) or cliente_detectado:
-            categoria = "cliente"
-
-        return json.dumps({
-            "categoria": categoria,
-            "cliente_detectado": cliente_detectado,
-            "confianza": 80,
-        })
-
-    elif nombre == "search_drive":
-        query = parametros.get("query", "")
-        max_results = parametros.get("max_results", 5)
-        try:
-            creds = Credentials.from_authorized_user_file('token.json', SCOPES)
-            if creds.expired and creds.refresh_token:
-                creds.refresh(Request())
-            service_drive = build('drive', 'v3', credentials=creds)
-            resultados = service_drive.files().list(
-                q=f"fullText contains '{query}'",
-                pageSize=max_results,
-                fields="files(id, name, mimeType, modifiedTime)"
-            ).execute()
-            archivos = [
-                {"nombre": f.get("name"), "tipo": f.get("mimeType")}
-                for f in resultados.get("files", [])
-            ]
-            return json.dumps({"archivos": archivos, "total": len(archivos)})
-        except Exception as e:
-            return json.dumps({"archivos": [], "error": str(e)})
-
-    elif nombre == "generate_report":
-        risk_level = (parametros.get("risk_level") or "MEDIUM").upper()
-        iconos = {"CRITICAL": "CRITICAL", "HIGH": "HIGH", "MEDIUM": "MEDIUM", "LOW": "LOW"}
-        nivel = iconos.get(risk_level, "MEDIUM")
-        fecha = datetime.now().strftime("%Y-%m-%d %H:%M")
-        reporte = f"""PROJECT INTELLIGENCE REPORT
-============================
-
-PROJECT: {parametros.get('project', '')}
-LOCATION: {parametros.get('location', '')}
-CLIENT: {parametros.get('client', '')}
-DATE: {fecha}
-SHIFT: {parametros.get('shift', '')}
-
-CURRENT STATUS: {parametros.get('current_status', '')}
-
-WORK COMPLETED: {parametros.get('work_completed', '')}
-
-WORK PENDING: {parametros.get('work_pending', '')}
-
-ISSUES DETECTED: {parametros.get('issues_detected', '')}
-
-RISK LEVEL: {nivel}
-
-MATERIALS NEEDED: {parametros.get('materials_needed') or 'None reported.'}
-
-FOLLOW-UP REQUIRED: {parametros.get('followup_required') or 'None at this time.'}
-
-PHOTOS STILL NEEDED: {parametros.get('photos_needed') or 'None at this time.'}
-
-APPLICABLE CODES / COMPLIANCE NOTES: {parametros.get('compliance_notes') or 'N/A for this report.'}
-
-RECOMMENDED NEXT ACTIONS: {parametros.get('recommended_actions') or 'Awaiting further input.'}
-
----
-Generated by JRS Central Operations Intelligence System
-"""
-        return json.dumps({"report": reporte})
-
-    elif nombre == "create_gmail_draft":
-        original_email_id = parametros.get("original_email_id", "")
-        to = parametros.get("to", "")
-        subject = parametros.get("subject", "")
-        body = parametros.get("body", "")
-        is_external = parametros.get("is_external", True)
-
-        try:
-            service = obtener_servicio_gmail()
-            header = (
-                "INTERNAL DRAFT - REQUIRES RICHARD'S APPROVAL BEFORE SENDING\n"
-                "================================================================\n\n"
+    try:
+        if nombre == "classify_email":
+            resultado = classify_email(
+                subject=parametros.get("subject", ""),
+                body=parametros.get("body", ""),
+                sender=parametros.get("sender", ""),
             )
-            cuerpo_final = (header + body) if is_external else body
 
-            mensaje = MIMEText(cuerpo_final, 'plain', 'utf-8')
-            mensaje['to'] = to
-            mensaje['subject'] = subject
-            raw = base64.urlsafe_b64encode(mensaje.as_bytes()).decode('utf-8')
+        elif nombre == "search_drive":
+            resultado = search_drive(
+                query=parametros.get("query", ""),
+                max_results=parametros.get("max_results", 5),
+            )
 
-            borrador = service.users().drafts().create(
-                userId='me',
-                body={'message': {'raw': raw}}
-            ).execute()
-            draft_id = borrador.get('id', '')
+        elif nombre == "generate_report":
+            resultado = generate_report(
+                project=parametros.get("project", ""),
+                location=parametros.get("location", ""),
+                client=parametros.get("client", ""),
+                shift=parametros.get("shift", ""),
+                current_status=parametros.get("current_status", ""),
+                work_completed=parametros.get("work_completed", ""),
+                work_pending=parametros.get("work_pending", ""),
+                issues_detected=parametros.get("issues_detected", ""),
+                risk_level=parametros.get("risk_level", "MEDIUM"),
+                materials_needed=parametros.get("materials_needed", ""),
+                followup_required=parametros.get("followup_required", ""),
+                photos_needed=parametros.get("photos_needed", ""),
+                compliance_notes=parametros.get("compliance_notes", ""),
+                recommended_actions=parametros.get("recommended_actions", ""),
+            )
 
-            # Cambiar etiquetas
-            id_entrada = obtener_id_etiqueta(service, "AI-Agent")
-            id_salida = obtener_id_etiqueta(service, "AI-Procesado")
-            if id_entrada and id_salida and original_email_id:
-                service.users().messages().modify(
-                    userId='me',
-                    id=original_email_id,
-                    body={
-                        'removeLabelIds': [id_entrada],
-                        'addLabelIds': [id_salida],
-                    }
-                ).execute()
+        elif nombre == "create_gmail_draft":
+            resultado = create_gmail_draft(
+                original_email_id=parametros.get("original_email_id", ""),
+                to=parametros.get("to", ""),
+                subject=parametros.get("subject", ""),
+                body=parametros.get("body", ""),
+                is_external=parametros.get("is_external", True),
+            )
 
-            logger.info(f"Borrador creado: {draft_id}")
-            return json.dumps({"draft_id": draft_id, "status": "created"})
+        elif nombre == "alert_if_critical":
+            resultado = alert_if_critical(
+                severity=parametros.get("severity", ""),
+                project=parametros.get("project", ""),
+                summary=parametros.get("summary", ""),
+                detail=parametros.get("detail", ""),
+            )
 
-        except Exception as e:
-            logger.error(f"Error creando borrador: {e}")
-            return json.dumps({"draft_id": "", "status": f"error: {e}"})
+        elif nombre == "consult_building_code":
+            resultado = consult_building_code(
+                code_family=parametros.get("code_family", ""),
+                topic=parametros.get("topic", ""),
+                state=parametros.get("state", ""),
+            )
 
-    elif nombre == "alert_if_critical":
-        severity = (parametros.get("severity") or "").upper()
-        if severity != "CRITICAL":
-            return json.dumps({"alert_sent": False, "reason": f"Severity {severity} no es CRITICAL"})
+        elif nombre == "verify_compliance":
+            resultado = verify_compliance(
+                observed_value=parametros.get("observed_value", ""),
+                standard_reference=parametros.get("standard_reference", ""),
+                required_value=parametros.get("required_value", ""),
+                context=parametros.get("context", ""),
+            )
 
-        project = parametros.get("project", "")
-        summary = parametros.get("summary", "")
-        detail = parametros.get("detail", "")
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        asunto = f"CRITICAL ALERT - {project}"
-        cuerpo = f"""CRITICAL ALERT - JRS Central Operations Intelligence System
+        elif nombre == "cite_applicable_standard":
+            resultado = cite_applicable_standard(
+                code_family=parametros.get("code_family", ""),
+                year=parametros.get("year", ""),
+                section=parametros.get("section", ""),
+                topic=parametros.get("topic", ""),
+                state=parametros.get("state", ""),
+            )
 
-Time: {timestamp}
-Project: {project}
-
-SUMMARY: {summary}
-
-DETAIL: {detail}
-
-This is an automated CRITICAL severity alert.
-Action required from operations leadership.
-"""
-        enviados = []
-        try:
-            service = obtener_servicio_gmail()
-            for destinatario in ["richard@jrsretailservices.com", "richardbodington2@gmail.com"]:
-                try:
-                    mensaje = MIMEText(cuerpo, 'plain', 'utf-8')
-                    mensaje['to'] = destinatario
-                    mensaje['subject'] = asunto
-                    raw = base64.urlsafe_b64encode(mensaje.as_bytes()).decode('utf-8')
-                    service.users().messages().send(
-                        userId='me', body={'raw': raw}
-                    ).execute()
-                    enviados.append(destinatario)
-                except Exception as e:
-                    logger.error(f"Error enviando alerta a {destinatario}: {e}")
-        except Exception as e:
-            logger.error(f"Error conectando Gmail para alerta: {e}")
-
-        return json.dumps({"alert_sent": len(enviados) > 0, "recipients": enviados})
-
-    elif nombre == "consult_building_code":
-        code_family = (parametros.get("code_family") or "").upper()
-        topic = (parametros.get("topic") or "").upper()
-        state = (parametros.get("state") or "").upper()
-
-        base = {
-            "IBC:GROUP M": {"section": "303.4", "reference": "Per IBC 2024, Section 303.4", "text": "Group M: mercantile occupancy, retail stores."},
-            "IBC:CEILING HEIGHT": {"section": "1003.2", "reference": "Per IBC 2024, Section 1003.2", "text": "Minimum ceiling height 7 ft 6 in for occupied spaces."},
-            "ADA:DOOR OPENING": {"section": "404.2.3", "reference": "Per 2010 ADA Standards, Section 404.2.3", "text": "Clear width 32 in minimum."},
-            "NFPA-101:EXIT SIGNS": {"section": "7.10", "reference": "Per NFPA 101 (2024), Section 7.10", "text": "Exits shall be marked by approved signs."},
-            "OSHA-1926:FALL PROTECTION": {"section": "1926.501", "reference": "Per OSHA 29 CFR 1926.501", "text": "Fall protection required at 6 feet above lower level."},
-        }
-
-        for clave, datos in base.items():
-            familia, tema = clave.split(":", 1)
-            if code_family == familia and tema in topic:
-                return json.dumps({**datos, "confidence": "medium",
-                                   "jurisdiction_note": f"Verify local adoption in {state}." if state else "Verify local adoption."})
-
-        return json.dumps({"section": "", "text": f"No reference found for {code_family} on '{topic}'. Verify manually.", "confidence": "low"})
-
-    elif nombre == "verify_compliance":
-        observed = parametros.get("observed_value", "")
-        required = parametros.get("required_value", "")
-        reference = parametros.get("standard_reference", "")
-
-        def extraer(texto):
-            m = re.search(r'(\d+(?:\.\d+)?)', texto or "")
-            return float(m.group(1)) if m else None
-
-        obs = extraer(observed)
-        req = extraer(required)
-        es_min = "min" in required.lower()
-
-        if obs is not None and req is not None:
-            if es_min:
-                status = "compliant" if obs >= req else "non-compliant"
-            else:
-                status = "compliant" if obs <= req else "non-compliant"
         else:
-            status = "needs-review"
+            return json.dumps({"error": f"Herramienta desconocida: {nombre}"})
 
-        return json.dumps({"status": status, "observed": observed, "required": required, "reference": reference})
+        return json.dumps(resultado)
 
-    elif nombre == "cite_applicable_standard":
-        code_family = parametros.get("code_family", "")
-        year = parametros.get("year", "")
-        section = parametros.get("section", "")
-        topic = parametros.get("topic", "")
-        state = parametros.get("state", "")
-
-        cita = f"Per {code_family} {year}, Section {section} ({topic})."
-        nota = f" Note: verify local adoption in {state}." if state else " Note: verify local adoption in the applicable jurisdiction."
-        return json.dumps({"citation": cita + nota})
-
-    else:
-        return json.dumps({"error": f"Herramienta desconocida: {nombre}"})
+    except Exception as e:
+        logger.error(f"Error ejecutando herramienta '{nombre}': {e}")
+        return json.dumps({"error": str(e)})
 
 
 # =====================================================

@@ -220,13 +220,8 @@ def classify_email(subject: str, body: str, sender: str) -> dict:
 # =====================================================
 def search_drive(query: str, max_results: int = 5) -> dict:
     try:
-        creds = None
-        if os.path.exists('token.json'):
-            creds = Credentials.from_authorized_user_file('token.json', SCOPES)
-        if not creds or not creds.valid:
-            if creds and creds.expired and creds.refresh_token:
-                creds.refresh(Request())
-
+        gmail_service = obtener_servicio_gmail()
+        creds = gmail_service._http.credentials
         service_drive = build('drive', 'v3', credentials=creds)
         resultados = service_drive.files().list(
             q=f"fullText contains '{query}'",
