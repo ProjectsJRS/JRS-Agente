@@ -486,8 +486,9 @@ async def main():
 
             if not correos:
                 logger.info("No hay correos pendientes en este ciclo.")
-            elif len(correos) == MAX_EMAILS_PER_CYCLE:
-                logger.info(f"{len(correos)} correo(s) procesados. Puede haber más en cola — se procesarán en el siguiente ciclo.")
+            else:
+                if len(correos) == MAX_EMAILS_PER_CYCLE:
+                    logger.info(f"{len(correos)} correo(s) procesados...")
                 for correo in correos:
                     resultado = procesar_un_correo(correo)
                     logger.info(f"Resultado: {resultado}")

@@ -51,7 +51,7 @@ def obtener_servicio_gmail():
             creds = flow.run_local_server(port=0)
         with open('token.json', 'w') as token:
             token.write(creds.to_json())
-    return build('gmail', 'v1', credentials=creds)
+    return build('gmail', 'v1', credentials=creds, cache_discovery=False)
 
 
 def obtener_id_etiqueta(service, nombre_etiqueta):
@@ -225,7 +225,7 @@ def search_drive(query: str, max_results: int = 5) -> dict:
     try:
         gmail_service = obtener_servicio_gmail()
         creds = gmail_service._http.credentials
-        service_drive = build('drive', 'v3', credentials=creds)
+        service_drive = build('drive', 'v3', credentials=creds, cache_discovery=False)
         resultados = service_drive.files().list(
             q=f"fullText contains '{query}'",
             pageSize=max_results,
