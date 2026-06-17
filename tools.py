@@ -13,6 +13,7 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
+from rag_query import buscar_codigo
 
 load_dotenv()
 
@@ -436,81 +437,55 @@ def consult_building_code(
     topic: str,
     state: str = "",
 ) -> dict:
-    code_family = (code_family or "").upper().strip()
-    state = (state or "").upper().strip()
+    """
+    Consulta el conocimiento técnico de JRS (RAG con ChromaDB).
+    """
+    resultado = buscar_codigo(
+        code_family=code_family,
+        topic=topic,
+        state=state if state else None,
+        n_results=3,
+    )
 
-    base_conocida = {
-        "IBC:GROUP M": {
-            "section": "303.4 / Chapter 10",
-            "title": "Mercantile Occupancy (Group M)",
-            "text": (
-                "Group M occupancy: buildings or structures used for the "
-                "display and sale of merchandise. Includes retail stores."
-            ),
-            "reference": "Per IBC 2024, Section 303.4",
-        },
-        "IBC:CEILING HEIGHT": {
-            "section": "1003.2",
-            "title": "Ceiling height — means of egress",
-            "text": (
-                "The minimum ceiling height for occupied spaces is 7 ft 6 in "
-                "(2286 mm), except in specific exceptions listed in 1003.2.1."
-            ),
-            "reference": "Per IBC 2024, Section 1003.2",
-        },
-        "ADA:DOOR OPENING": {
-            "section": "404.2.3",
-            "title": "Clear width of doorways",
-            "text": "Door openings shall provide a clear width of 32 in (815 mm) minimum.",
-            "reference": "Per 2010 ADA Standards, Section 404.2.3",
-        },
-        "NFPA-101:EXIT SIGNS": {
-            "section": "7.10",
-            "title": "Marking of means of egress",
-            "text": (
-                "Exits and exit access doors shall be marked by an approved "
-                "sign readily visible from any direction of egress travel."
-            ),
-            "reference": "Per NFPA 101 (2024), Section 7.10",
-        },
-        "OSHA-1926:FALL PROTECTION": {
-            "section": "1926.501",
-            "title": "Duty to have fall protection",
-            "text": (
-                "Employer shall provide fall protection for employees on a "
-                "walking/working surface 6 feet or more above a lower level."
-            ),
-            "reference": "Per OSHA 29 CFR 1926.501",
-        },
-    }
+    if not resultado["found"]:
+        return {
+            "section": "",
+            "title": "",
+            "text": "No relevant chunks found in the knowledge base for this query.",
+            "reference": "",
+            "confidence": "low",
+            "jurisdiction_note": resultado["jurisdiction_note"],
+        }
 
-    topic_normalizado = topic.upper().strip()
-    for clave, datos in base_conocida.items():
-        familia_clave, tema_clave = clave.split(":", 1)
-        if code_family == familia_clave and tema_clave in topic_normalizado:
-            nota = (
-                f"Verify local adoption in {state}." if state
-                else "Verify local adoption in the applicable jurisdiction."
-            )
-            return {
-                "section": datos["section"],
-                "title": datos["title"],
-                "text": datos["text"],
-                "reference": datos["reference"],
-                "confidence": "medium",
-                "jurisdiction_note": nota,
-            }
+    # El mejor chunk (primer resultado)
+    top = resultado["results"][0]
+    meta = top["metadata"]
+
+    family = meta.get("family", code_family).strip()
+    year = meta.get("year", "").strip()
+    section = resultado["best_section"] or meta.get("section_hint", "").strip()
+    title = meta.get("title", "").strip()
+
+    # Construir referencia formal
+    if year and section:
+        reference = f"Per {family} {year}, Section {section}"
+    elif year:
+        reference = f"Per {family} {year}"
+    else:
+        reference = f"Per {family}"
+
+    # Combinar los top 3 chunks como texto evidencial (Claude verá esto)
+    texto_evidencial = "\n\n---\n\n".join([
+        item["text"][:600] for item in resultado["results"][:3]
+    ])
 
     return {
-        "section": "",
-        "title": "",
-        "text": (
-            f"No reference found for {code_family} on '{topic}'. "
-            "In Phase 5 this query will use ChromaDB with full codes."
-        ),
-        "reference": "",
-        "confidence": "low",
-        "jurisdiction_note": "Verify against current local code adoption.",
+        "section": section,
+        "title": title,
+        "text": texto_evidencial,
+        "reference": reference,
+        "confidence": resultado["confidence"],
+        "jurisdiction_note": resultado["jurisdiction_note"],
     }
 
 

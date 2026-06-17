@@ -29,3 +29,6 @@ Thumbs.db
 # ChromaDB persistent storage (contains copyrighted material)
 chroma_data/
 *.chroma
+
+# Códigos de construcción — material con copyright
+codigos_pdf/
