@@ -466,13 +466,20 @@ def consult_building_code(
     section = resultado["best_section"] or meta.get("section_hint", "").strip()
     title = meta.get("title", "").strip()
 
-    # Construir referencia formal
-    if year and section:
-        reference = f"Per {family} {year}, Section {section}"
+    # Construir referencia formal.
+    # Evitar duplicar el año cuando la familia ya lo contiene
+    # (ej: family="OSHA 1926" + year="1926" -> "OSHA 1926", no "OSHA 1926 1926").
+    if year and year in family:
+        familia_ref = family          # el año ya está en el nombre de la familia
     elif year:
-        reference = f"Per {family} {year}"
+        familia_ref = f"{family} {year}"
     else:
-        reference = f"Per {family}"
+        familia_ref = family
+
+    if section:
+        reference = f"Per {familia_ref}, Section {section}"
+    else:
+        reference = f"Per {familia_ref}"
 
     # Combinar los top 3 chunks como texto evidencial (Claude verá esto)
     texto_evidencial = "\n\n---\n\n".join([
