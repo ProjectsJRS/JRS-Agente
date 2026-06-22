@@ -14,6 +14,7 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from rag_query import buscar_codigo
+from codigos_referencia import es_codigo_de_referencia, consultar_referencia
 
 load_dotenv()
 
@@ -440,6 +441,11 @@ def consult_building_code(
     """
     Consulta el conocimiento técnico de JRS (RAG con ChromaDB).
     """
+    # Códigos no almacenables por copyright (NFPA): orientar al texto oficial
+    # en vez de buscar en ChromaDB (donde no están y nunca deben estar).
+    if es_codigo_de_referencia(code_family):
+        return consultar_referencia(code_family, topic, state if state else None)
+
     resultado = buscar_codigo(
         code_family=code_family,
         topic=topic,
