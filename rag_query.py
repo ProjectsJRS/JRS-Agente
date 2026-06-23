@@ -2,11 +2,15 @@
 # Funciones de búsqueda en ChromaDB para RAG
 
 import chromadb
+import os
 import re
 from typing import List, Dict, Optional
 
-# Cliente persistente (apunta a la misma carpeta que la carga)
-_cliente = chromadb.PersistentClient(path="./chroma_data")
+# Cliente persistente. La ruta sale de la variable de entorno CHROMA_DB_PATH.
+# En local no existe esa variable, asi que usa "./chroma_data" (igual que antes).
+# En Railway la variable apunta al volumen persistente: /data/chroma_db.
+_CHROMA_PATH = os.getenv("CHROMA_DB_PATH", "./chroma_data")
+_cliente = chromadb.PersistentClient(path=_CHROMA_PATH)
 
 # Mapeo: familia de código → colección donde buscar
 FAMILIA_A_COLECCION = {
