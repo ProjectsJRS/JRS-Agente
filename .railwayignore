@@ -1,0 +1,22 @@
+# Secretos ? NUNCA subir al deploy
+.env
+.env.backup
+token.json
+credentials.json
+
+# Entorno virtual ? Railway lo reconstruye con requirements.txt
+venv/
+
+# Datos pesados ? van por volumen aparte, no en el deploy
+chroma_data/
+codigos_pdf/
+chroma_data_backup_*.zip
+
+# Cache y temporales
+__pycache__/
+*.pyc
+.cache/
+
+# Respaldos locales
+*_backup.py
+*_backup2.py
