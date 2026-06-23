@@ -32,28 +32,41 @@ from tools import (
 )
 from client_protocols import get_protocol
 
-load_dotenv()
+load_dotenv()  # En local lee .env. En Railway no hay .env: lee las env vars del panel.
+
+# =====================================================
+# CONFIGURACION DESDE EL ENTORNO
+# En local sale del .env; en Railway sale del panel de Variables.
+# =====================================================
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+TIMEZONE = os.getenv("TIMEZONE", "America/Chicago")
+CHROMA_DB_PATH = os.getenv("CHROMA_DB_PATH", "./chroma_data")
+
+MODELO = os.getenv("AGENT_MODEL", "claude-opus-4-8")
+SLEEP_BETWEEN_CYCLES_SECONDS = int(os.getenv("SLEEP_BETWEEN_CYCLES_SECONDS", "300"))
+MAX_EMAILS_PER_CYCLE = int(os.getenv("MAX_EMAILS_PER_CYCLE", "10"))
+MAX_ITERATIONS_PER_EMAIL = int(os.getenv("MAX_ITERATIONS_PER_EMAIL", "20"))
+MAX_CONSECUTIVE_FAILURES = int(os.getenv("MAX_CONSECUTIVE_FAILURES", "5"))
+
+# Validacion: si falta lo critico, fallar rapido con mensaje claro
+# en lugar de morir misteriosamente a los 30 segundos en Railway.
+if not ANTHROPIC_API_KEY:
+    raise RuntimeError(
+        "ANTHROPIC_API_KEY no configurada. Revisa las env vars de Railway."
+    )
 
 # =====================================================
 # CONFIGURACION DE LOGGING
+# Solo stdout: Railway captura la consola y la guarda en su panel de logs.
+# NO escribimos archivo local porque el contenedor se borra en cada redeploy.
 # =====================================================
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    handlers=[
-        logging.FileHandler('agent.log', encoding='utf-8'),
-        logging.StreamHandler(),
-    ]
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+    handlers=[logging.StreamHandler()],
 )
 logger = logging.getLogger("jrs-agent")
-
-# =====================================================
-# CONSTANTES
-# =====================================================
-MAX_ITERATIONS_PER_EMAIL = 20
-SLEEP_BETWEEN_CYCLES_SECONDS = 300
-MAX_EMAILS_PER_CYCLE = 10
-MODELO = "claude-opus-4-8"
 
 # =====================================================
 # CARGAR EL SYSTEM PROMPT
@@ -64,7 +77,7 @@ with open("system_prompt.txt", "r", encoding="utf-8") as f:
 # =====================================================
 # CLIENTE ANTHROPIC
 # =====================================================
-cliente = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+cliente = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
 # =====================================================
 # DEFINICION DE HERRAMIENTAS PARA LA API
@@ -477,7 +490,13 @@ def procesar_un_correo(correo: dict) -> dict:
 # FUNCION PRINCIPAL
 # =====================================================
 async def main():
-    logger.info("JRS Central Operations Intelligence System - INICIADO")
+    logger.info("JRS Central Operations Intelligence System - INICIADO en produccion")
+    logger.info(f"   Timezone:       {TIMEZONE}")
+    logger.info(f"   ChromaDB path:  {CHROMA_DB_PATH}")
+    logger.info(f"   Modelo:         {MODELO}")
+    logger.info(f"   Ciclo cada:     {SLEEP_BETWEEN_CYCLES_SECONDS}s")
+
+    consecutive_failures = 0
 
     while True:
         try:
@@ -493,15 +512,32 @@ async def main():
                     resultado = procesar_un_correo(correo)
                     logger.info(f"Resultado: {resultado}")
 
+            consecutive_failures = 0  # reset al completar el ciclo con exito
+
         except KeyboardInterrupt:
             logger.info("Interrupcion manual - cerrando agente.")
             break
         except Exception as e:
-            logger.error(f"Error inesperado en el bucle principal: {e}")
+            consecutive_failures += 1
+            logger.error(
+                f"Error en el ciclo ({consecutive_failures}/{MAX_CONSECUTIVE_FAILURES}): {e}",
+                exc_info=True,
+            )
+            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                logger.critical(
+                    f"{MAX_CONSECUTIVE_FAILURES} errores seguidos. Levantando excepcion "
+                    "para que Railway reinicie el proceso limpio."
+                )
+                raise
 
         logger.info(f"Esperando {SLEEP_BETWEEN_CYCLES_SECONDS} segundos...")
         await asyncio.sleep(SLEEP_BETWEEN_CYCLES_SECONDS)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        # Al presionar Ctrl+C durante el sleep, asyncio cancela la tarea y
+        # la interrupcion llega aqui. La capturamos para salir sin traceback.
+        logger.info("Interrupcion manual - cerrando agente.")
