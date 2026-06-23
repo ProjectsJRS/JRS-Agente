@@ -6,6 +6,9 @@ import os
 import json
 import asyncio
 import logging
+import zipfile
+import shutil
+import requests
 from datetime import datetime
 from dotenv import load_dotenv
 import anthropic
@@ -48,6 +51,12 @@ SLEEP_BETWEEN_CYCLES_SECONDS = int(os.getenv("SLEEP_BETWEEN_CYCLES_SECONDS", "30
 MAX_EMAILS_PER_CYCLE = int(os.getenv("MAX_EMAILS_PER_CYCLE", "10"))
 MAX_ITERATIONS_PER_EMAIL = int(os.getenv("MAX_ITERATIONS_PER_EMAIL", "20"))
 MAX_CONSECUTIVE_FAILURES = int(os.getenv("MAX_CONSECUTIVE_FAILURES", "5"))
+
+# Bootstrap del ChromaDB (descarga inicial desde GitHub Releases en Railway).
+# En local no se usa porque ./chroma_data ya existe.
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+GITHUB_REPO = os.getenv("GITHUB_REPO", "ProjectsJRS/JRS-Agente")
+CHROMADB_ASSET_ID = os.getenv("CHROMADB_ASSET_ID", "456015817")
 
 # Validacion: si falta lo critico, fallar rapido con mensaje claro
 # en lugar de morir misteriosamente a los 30 segundos en Railway.
@@ -487,6 +496,83 @@ def procesar_un_correo(correo: dict) -> dict:
 
 
 # =====================================================
+# BOOTSTRAP DEL CHROMADB
+# La primera vez que el agente arranca en Railway, el volumen /data esta vacio.
+# Esta funcion descarga la base de Fase 5 desde GitHub Releases y la instala.
+# En arranques posteriores detecta que ya existe y no hace nada.
+# En local no se activa porque ./chroma_data ya tiene la base.
+# =====================================================
+def asegurar_chromadb():
+    marcador = os.path.join(CHROMA_DB_PATH, "chroma.sqlite3")
+    if os.path.exists(marcador):
+        logger.info(f"ChromaDB ya presente en {CHROMA_DB_PATH}. No se descarga.")
+        return
+
+    if not GITHUB_TOKEN:
+        logger.warning(
+            "ChromaDB no encontrado y GITHUB_TOKEN no configurado. "
+            "Las consultas de codigos de construccion no funcionaran "
+            "hasta que se cargue la base de conocimiento."
+        )
+        return
+
+    logger.info("ChromaDB no encontrado. Descargando desde GitHub Releases...")
+
+    # Trabajamos dentro del volumen para que el movimiento final sea instantaneo.
+    volume_dir = os.path.dirname(CHROMA_DB_PATH) or "."
+    os.makedirs(volume_dir, exist_ok=True)
+    tmp_zip = os.path.join(volume_dir, "_chromadb_download.zip")
+    tmp_extract = os.path.join(volume_dir, "_chromadb_extract")
+
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/assets/{CHROMADB_ASSET_ID}"
+    headers = {
+        "Authorization": f"token {GITHUB_TOKEN}",
+        "Accept": "application/octet-stream",
+    }
+
+    try:
+        # 1) Descargar el ZIP por streaming (sin cargar 123 MB en memoria de golpe).
+        with requests.get(url, headers=headers, stream=True, timeout=600) as resp:
+            resp.raise_for_status()
+            total = 0
+            with open(tmp_zip, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                    f.write(chunk)
+                    total += len(chunk)
+        logger.info(f"Descarga completa: {total / 1_000_000:.1f} MB")
+
+        # 2) Descomprimir a una carpeta temporal.
+        if os.path.exists(tmp_extract):
+            shutil.rmtree(tmp_extract)
+        with zipfile.ZipFile(tmp_zip, "r") as z:
+            z.extractall(tmp_extract)
+
+        # 3) El ZIP trae una carpeta interna 'chroma_data'. Mover su contenido
+        #    al destino final CHROMA_DB_PATH (ej: /data/chroma_db).
+        fuente = os.path.join(tmp_extract, "chroma_data")
+        if not os.path.exists(fuente):
+            fuente = tmp_extract  # respaldo: si no hubiera carpeta interna
+        if os.path.exists(CHROMA_DB_PATH):
+            shutil.rmtree(CHROMA_DB_PATH)
+        shutil.move(fuente, CHROMA_DB_PATH)
+
+        logger.info(f"ChromaDB instalado correctamente en {CHROMA_DB_PATH}.")
+
+    except Exception as e:
+        logger.error(f"Error instalando ChromaDB: {e}", exc_info=True)
+        raise
+    finally:
+        # Limpieza de temporales (no critica si falla).
+        try:
+            if os.path.exists(tmp_zip):
+                os.remove(tmp_zip)
+            if os.path.exists(tmp_extract):
+                shutil.rmtree(tmp_extract)
+        except OSError:
+            pass
+
+
+# =====================================================
 # FUNCION PRINCIPAL
 # =====================================================
 async def main():
@@ -495,6 +581,9 @@ async def main():
     logger.info(f"   ChromaDB path:  {CHROMA_DB_PATH}")
     logger.info(f"   Modelo:         {MODELO}")
     logger.info(f"   Ciclo cada:     {SLEEP_BETWEEN_CYCLES_SECONDS}s")
+
+    # Asegurar que el ChromaDB este disponible antes de empezar a procesar.
+    asegurar_chromadb()
 
     consecutive_failures = 0
 
