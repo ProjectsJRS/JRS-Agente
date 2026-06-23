@@ -3,6 +3,7 @@
 # Version sin decoradores @tool — funciones puras de Python
 
 import os
+import json
 import base64
 from typing import List, Dict, Optional, Annotated
 from datetime import datetime
@@ -37,22 +38,64 @@ SCOPES = [
 RICHARD_CORPORATIVO = "richard@jrsretailservices.com"
 RICHARD_PERSONAL = "richardbodington2@gmail.com"
 
+# Credenciales de Gmail por variable de entorno (para Railway).
+# En local estos quedan en None y se usan los archivos token.json / credentials.json.
+GMAIL_TOKEN_JSON = os.getenv("GMAIL_TOKEN_JSON")
+GMAIL_CREDENTIALS_JSON = os.getenv("GMAIL_CREDENTIALS_JSON")
+
 # =====================================================
 # CONEXION A GMAIL
 # =====================================================
-def obtener_servicio_gmail():
-    creds = None
+def _cargar_credenciales_token():
+    """
+    Carga el token de Gmail.
+    Prioridad: archivo token.json local -> variable de entorno GMAIL_TOKEN_JSON.
+    Devuelve None si no hay ninguno.
+    """
     if os.path.exists('token.json'):
-        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+        return Credentials.from_authorized_user_file('token.json', SCOPES)
+    if GMAIL_TOKEN_JSON:
+        info = json.loads(GMAIL_TOKEN_JSON)
+        return Credentials.from_authorized_user_info(info, SCOPES)
+    return None
+
+
+def obtener_servicio_gmail():
+    creds = _cargar_credenciales_token()
+
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
+            # Token expirado pero refrescable: se renueva solo, sin navegador.
+            # Esto funciona igual en local y en Railway.
             creds.refresh(Request())
         else:
-            flow = InstalledAppFlow.from_client_secrets_file(
-                'credentials.json', SCOPES)
-            creds = flow.run_local_server(port=0)
-        with open('token.json', 'w') as token:
-            token.write(creds.to_json())
+            # No hay token valido y no se puede refrescar.
+            if GMAIL_TOKEN_JSON:
+                # Estamos en produccion (Railway): NO hay navegador. Fallar claro.
+                raise RuntimeError(
+                    "El token de Gmail (GMAIL_TOKEN_JSON) no es valido ni refrescable. "
+                    "Regenera token.json en local y actualiza la variable en Railway."
+                )
+            elif os.path.exists('credentials.json'):
+                # Estamos en local: login interactivo (abre navegador).
+                flow = InstalledAppFlow.from_client_secrets_file(
+                    'credentials.json', SCOPES)
+                creds = flow.run_local_server(port=0)
+            else:
+                raise RuntimeError(
+                    "No se encontraron credenciales de Gmail "
+                    "(ni archivos locales ni variables de entorno)."
+                )
+
+        # Guardar el token renovado en disco si el sistema lo permite.
+        # En Railway sin volumen esto se pierde al redeploy, pero el refresh_token
+        # de la env var permite volver a refrescar en el siguiente arranque.
+        try:
+            with open('token.json', 'w') as token:
+                token.write(creds.to_json())
+        except OSError:
+            pass
+
     return build('gmail', 'v1', credentials=creds, cache_discovery=False)
 
 
