@@ -46,6 +46,36 @@ CODIGOS_REFERENCIA: Dict[str, Dict] = {
                     "(Overcurrent Protection); Article 250 (Grounding)",
         "free_access_url": "https://link.nfpa.org/free-access/publications/70/2023",
     },
+    "NFPA 13": {
+        "title": "Standard for the Installation of Sprinkler Systems",
+        "edition": "2022",
+        "topics": [
+            "sprinkler", "fire sprinkler", "sprinkler system", "water supply",
+            "sprinkler spacing", "sprinkler coverage", "hydraulic calculation",
+            "riser", "sprinkler head", "fire suppression", "wet pipe",
+            "dry pipe", "fire protection water",
+            "rociador", "rociadores", "sistema de rociadores", "supresion",
+        ],
+        "chapters": "Chapter 8-10 (System Requirements/Installation); "
+                    "Chapter 16 (Water Supply); Chapter 23 (Plans/Calculations)",
+        "free_access_url": "https://link.nfpa.org/all-publications/13/2022",
+    },
+    "NFPA 72": {
+        "title": "National Fire Alarm and Signaling Code",
+        "edition": "2022",
+        "topics": [
+            "fire alarm", "alarm system", "smoke detector", "detection",
+            "notification appliance", "pull station", "horn strobe",
+            "signaling", "mass notification", "supervising station",
+            "waterflow alarm", "initiating device",
+            "alarma", "alarma de incendio", "detector de humo",
+            "deteccion", "notificacion",
+        ],
+        "chapters": "Chapter 17 (Initiating Devices); Chapter 18 "
+                    "(Notification Appliances); Chapter 23 (Protected Premises); "
+                    "Chapter 26 (Supervising Station)",
+        "free_access_url": "https://link.nfpa.org/all-publications/72/2022",
+    },
 }
 
 # Alias de familia → clave canónica (tolera variantes de escritura).
@@ -54,6 +84,8 @@ _ALIAS = {
     "LIFE SAFETY CODE": "NFPA 101",
     "NFPA 70": "NFPA 70", "NFPA-70": "NFPA 70", "NFPA70": "NFPA 70",
     "NEC": "NFPA 70", "NATIONAL ELECTRICAL CODE": "NFPA 70",
+    "NFPA 13": "NFPA 13", "NFPA-13": "NFPA 13", "NFPA13": "NFPA 13",
+    "NFPA 72": "NFPA 72", "NFPA-72": "NFPA 72", "NFPA72": "NFPA 72",
 }
 
 
