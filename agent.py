@@ -504,9 +504,32 @@ def procesar_un_correo(correo: dict) -> dict:
 # =====================================================
 def asegurar_chromadb():
     marcador = os.path.join(CHROMA_DB_PATH, "chroma.sqlite3")
+
+    # Validamos que el ChromaDB este COMPLETO, no solo que exista el archivo.
+    # ChromaDB crea un chroma.sqlite3 vacio (~150 KB) automaticamente al arrancar
+    # sin datos. Una base real pesa decenas de MB y tiene subcarpetas de colecciones.
+    # Por eso exigimos: sqlite >= 10 MB Y al menos una subcarpeta de coleccion.
+    TAMANO_MINIMO_SQLITE = 10 * 1024 * 1024  # 10 MB
+
     if os.path.exists(marcador):
-        logger.info(f"ChromaDB ya presente en {CHROMA_DB_PATH}. No se descarga.")
-        return
+        tamano = os.path.getsize(marcador)
+        subcarpetas = [
+            d for d in os.listdir(CHROMA_DB_PATH)
+            if os.path.isdir(os.path.join(CHROMA_DB_PATH, d))
+        ]
+        if tamano >= TAMANO_MINIMO_SQLITE and subcarpetas:
+            logger.info(
+                f"ChromaDB completo presente en {CHROMA_DB_PATH} "
+                f"({tamano / 1_000_000:.0f} MB, {len(subcarpetas)} colecciones). No se descarga."
+            )
+            return
+        # Existe pero esta incompleto/vacio: lo borramos para descargar el real.
+        logger.warning(
+            f"ChromaDB en {CHROMA_DB_PATH} esta incompleto "
+            f"(sqlite {tamano / 1024:.0f} KB, {len(subcarpetas)} colecciones). "
+            "Se eliminara y se descargara la base completa."
+        )
+        shutil.rmtree(CHROMA_DB_PATH)
 
     if not GITHUB_TOKEN:
         logger.warning(
