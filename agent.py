@@ -564,20 +564,28 @@ def asegurar_chromadb():
                     total += len(chunk)
         logger.info(f"Descarga completa: {total / 1_000_000:.1f} MB")
 
-        # 2) Descomprimir a una carpeta temporal.
-        if os.path.exists(tmp_extract):
-            shutil.rmtree(tmp_extract)
-        with zipfile.ZipFile(tmp_zip, "r") as z:
-            z.extractall(tmp_extract)
-
-        # 3) El ZIP trae una carpeta interna 'chroma_data'. Mover su contenido
-        #    al destino final CHROMA_DB_PATH (ej: /data/chroma_db).
-        fuente = os.path.join(tmp_extract, "chroma_data")
-        if not os.path.exists(fuente):
-            fuente = tmp_extract  # respaldo: si no hubiera carpeta interna
+        # 2) Descomprimir manejando rutas estilo Windows.
+        #    El ZIP se creo en Windows, asi que sus rutas internas usan '\'
+        #    como separador. Linux NO lo interpreta como separador de carpetas,
+        #    asi que hay que traducir '\' a '/' a mano y crear las carpetas reales.
+        #    Tambien quitamos el prefijo de la carpeta interna 'chroma_data'.
         if os.path.exists(CHROMA_DB_PATH):
             shutil.rmtree(CHROMA_DB_PATH)
-        shutil.move(fuente, CHROMA_DB_PATH)
+        os.makedirs(CHROMA_DB_PATH, exist_ok=True)
+
+        with zipfile.ZipFile(tmp_zip, "r") as z:
+            for info in z.infolist():
+                nombre = info.filename.replace("\\", "/")  # normalizar separador
+                # Quitar el prefijo 'chroma_data/' para que el contenido quede
+                # directo en CHROMA_DB_PATH (ej: /data/chroma_db/chroma.sqlite3).
+                if nombre.startswith("chroma_data/"):
+                    nombre = nombre[len("chroma_data/"):]
+                if not nombre or nombre.endswith("/"):
+                    continue  # saltar entradas de carpeta o vacias
+                destino = os.path.join(CHROMA_DB_PATH, nombre)
+                os.makedirs(os.path.dirname(destino), exist_ok=True)
+                with z.open(info) as origen, open(destino, "wb") as salida:
+                    shutil.copyfileobj(origen, salida)
 
         logger.info(f"ChromaDB instalado correctamente en {CHROMA_DB_PATH}.")
 
@@ -589,8 +597,6 @@ def asegurar_chromadb():
         try:
             if os.path.exists(tmp_zip):
                 os.remove(tmp_zip)
-            if os.path.exists(tmp_extract):
-                shutil.rmtree(tmp_extract)
         except OSError:
             pass
 
