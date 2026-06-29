@@ -129,8 +129,11 @@ TOOLS_DEFINITION = [
     {
         "name": "generate_report",
         "description": (
-            "Genera un Project Intelligence Report estructurado en formato JRS. "
-            "Usala DESPUES de leer el correo, clasificarlo y buscar contexto."
+            "Genera UN solo Project Intelligence Report consolidado en formato JRS. "
+            "Usala DESPUES de leer el correo, clasificarlo y buscar contexto. "
+            "Llamala UNA sola vez por correo: si el correo cubre varios proyectos "
+            "o crews, inclúyelos TODOS en un unico reporte consolidado, no uno por "
+            "proyecto."
         ),
         "input_schema": {
             "type": "object",
@@ -436,6 +439,8 @@ def procesar_un_correo(correo: dict) -> dict:
             "This is an INTERNAL CREW UPDATE data feed (Section 7.5). "
             "Process it for reporting only: classify, search context if useful, "
             "and generate the Project Intelligence Report. "
+            "Generate EXACTLY ONE consolidated report covering ALL crews and "
+            "projects in this feed; call generate_report only once. "
             "If you detect CRITICAL severity (e.g., worker injury), send the "
             "immediate alert to Richard before continuing. "
             "Do NOT attempt to reply; this feed never gets a response and it "
@@ -497,8 +502,10 @@ def procesar_un_correo(correo: dict) -> dict:
                         logger.info(f"  Herramienta: {nombre_tool}")
                         resultado = ejecutar_herramienta(nombre_tool, params_tool)
 
-                        # Guardar params del reporte (para la metadata de historia)
-                        if nombre_tool == "generate_report":
+                        # Guardar params del reporte (para la metadata de historia).
+                        # Conservamos los del PRIMER generate_report; si por algo
+                        # el modelo llamara dos veces, no perdemos la metadata inicial.
+                        if nombre_tool == "generate_report" and not report_params:
                             report_params = params_tool
 
                         # Capturar draft_id y el texto del reporte
@@ -507,7 +514,12 @@ def procesar_un_correo(correo: dict) -> dict:
                             if nombre_tool == "create_gmail_draft" and resultado_dict.get("draft_id"):
                                 draft_id = resultado_dict["draft_id"]
                             if nombre_tool == "generate_report" and resultado_dict.get("report"):
-                                report_text = resultado_dict["report"]
+                                # Acumular (no sobrescribir): si hubiera mas de un
+                                # reporte, se conservan TODOS en historia.
+                                nuevo = resultado_dict["report"]
+                                report_text = nuevo if not report_text else (
+                                    report_text + "\n\n---\n\n" + nuevo
+                                )
                         except Exception:
                             pass
 
