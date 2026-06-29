@@ -417,8 +417,11 @@ def procesar_un_correo(correo: dict) -> dict:
         "Process the following email following the system prompt protocol. "
         "If the sender is external, prepare only a draft with the approval header. "
         "If you detect CRITICAL severity, send an immediate alert before continuing. "
-        "Use the available tools to classify, search context, generate the report, "
-        "and create the Gmail draft.\n\n"
+        "Use the available tools to classify, search context, and generate the report. "
+        "Create a Gmail draft ONLY when the system prompt protocol calls for a response "
+        "(e.g., external correspondence requiring Richard's approval). "
+        "Do NOT create a draft for internal data feeds such as [CREW UPDATE] emails "
+        "(Section 7.5); those are ingested for reporting only.\n\n"
         f"EMAIL_ID to use when modifying labels: {email_id}\n\n"
         f"{contexto_remitente}"
     )
