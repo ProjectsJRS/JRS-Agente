@@ -32,6 +32,8 @@ from tools import (
     consult_building_code,
     verify_compliance,
     cite_applicable_standard,
+    guardar_en_historia,
+    marcar_como_procesado,
 )
 from client_protocols import get_protocol
 
@@ -412,24 +414,54 @@ def procesar_un_correo(correo: dict) -> dict:
         f"CUERPO:\n{correo.get('body', '')}"
     )
 
-    instruccion = (
-        "IMPORTANT: All reports, drafts and communications must be written in English only. "
-        "Process the following email following the system prompt protocol. "
-        "If the sender is external, prepare only a draft with the approval header. "
-        "If you detect CRITICAL severity, send an immediate alert before continuing. "
-        "Use the available tools to classify, search context, and generate the report. "
-        "Create a Gmail draft ONLY when the system prompt protocol calls for a response "
-        "(e.g., external correspondence requiring Richard's approval). "
-        "Do NOT create a draft for internal data feeds such as [CREW UPDATE] emails "
-        "(Section 7.5); those are ingested for reporting only.\n\n"
-        f"EMAIL_ID to use when modifying labels: {email_id}\n\n"
-        f"{contexto_remitente}"
+    # =====================================================
+    # Deteccion deterministica de CREW UPDATE interno (SECTION 7.5):
+    # asunto con marcador [CREW UPDATE] + remitente interno whitelisted.
+    # Para estos NO ofrecemos create_gmail_draft: el modelo no puede
+    # redactar lo que no tiene en su lista de tools. alert_if_critical
+    # sigue disponible para que una lesion escale igual.
+    # =====================================================
+    asunto_norm = asunto.strip().lower()
+    es_crew_update = (
+        asunto_norm.startswith("[crew update]")
+        and sender_check["is_internal"]
     )
+
+    if es_crew_update:
+        tools_para_este_correo = [
+            t for t in TOOLS_DEFINITION if t["name"] != "create_gmail_draft"
+        ]
+        instruccion = (
+            "IMPORTANT: All output must be written in English only. "
+            "This is an INTERNAL CREW UPDATE data feed (Section 7.5). "
+            "Process it for reporting only: classify, search context if useful, "
+            "and generate the Project Intelligence Report. "
+            "If you detect CRITICAL severity (e.g., worker injury), send the "
+            "immediate alert to Richard before continuing. "
+            "Do NOT attempt to reply; this feed never gets a response and it "
+            "will be closed automatically.\n\n"
+            f"EMAIL_ID: {email_id}\n\n"
+            f"{contexto_remitente}"
+        )
+    else:
+        tools_para_este_correo = TOOLS_DEFINITION
+        instruccion = (
+            "IMPORTANT: All reports, drafts and communications must be written in English only. "
+            "Process the following email following the system prompt protocol. "
+            "If the sender is external, prepare only a draft with the approval header. "
+            "If you detect CRITICAL severity, send an immediate alert before continuing. "
+            "Use the available tools to classify, search context, generate the report, "
+            "and create the Gmail draft.\n\n"
+            f"EMAIL_ID to use when modifying labels: {email_id}\n\n"
+            f"{contexto_remitente}"
+        )
 
     # Agent Loop con Anthropic API
     messages = [{"role": "user", "content": instruccion}]
     iteraciones = 0
     draft_id = None
+    report_text = None
+    report_params = {}
 
     try:
         while iteraciones < MAX_ITERATIONS_PER_EMAIL:
@@ -440,7 +472,7 @@ def procesar_un_correo(correo: dict) -> dict:
                 model=MODELO,
                 max_tokens=8192,
                 system=SYSTEM_PROMPT,
-                tools=TOOLS_DEFINITION,
+                tools=tools_para_este_correo,
                 messages=messages,
             )
 
@@ -465,11 +497,17 @@ def procesar_un_correo(correo: dict) -> dict:
                         logger.info(f"  Herramienta: {nombre_tool}")
                         resultado = ejecutar_herramienta(nombre_tool, params_tool)
 
-                        # Capturar draft_id si se creo un borrador
+                        # Guardar params del reporte (para la metadata de historia)
+                        if nombre_tool == "generate_report":
+                            report_params = params_tool
+
+                        # Capturar draft_id y el texto del reporte
                         try:
                             resultado_dict = json.loads(resultado)
                             if nombre_tool == "create_gmail_draft" and resultado_dict.get("draft_id"):
                                 draft_id = resultado_dict["draft_id"]
+                            if nombre_tool == "generate_report" and resultado_dict.get("report"):
+                                report_text = resultado_dict["report"]
                         except Exception:
                             pass
 
@@ -490,6 +528,28 @@ def procesar_un_correo(correo: dict) -> dict:
     except Exception as e:
         logger.error(f"Error en Agent Loop para {email_id}: {e}")
         return {"result": f"error: {e}", "iterations": iteraciones, "draft_id": None}
+
+    # Cierre especial de CREW UPDATE: persistir a historia + marcar procesado
+    # POR CODIGO. Sin esto el correo se quedaria en AI-Agent y se reprocesaria
+    # en cada ciclo (bucle infinito).
+    if es_crew_update:
+        if report_text:
+            guardar_en_historia(
+                report_text=report_text,
+                doc_type="crew_update",
+                date=datetime.now().strftime("%Y-%m-%d"),
+                risk_level=report_params.get("risk_level", ""),
+                clients=report_params.get("client", ""),
+                projects=report_params.get("project", ""),
+                source_email_id=email_id,
+            )
+        else:
+            logger.warning(
+                f"[crew_update] {email_id}: no se capturo el reporte; "
+                "se cierra el correo sin guardar en historia."
+            )
+        cierre = marcar_como_procesado(email_id)
+        logger.info(f"[crew_update] {email_id}: cierre -> {cierre}")
 
     return {
         "result": "processed",

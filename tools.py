@@ -14,7 +14,10 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
-from rag_query import buscar_codigo
+from rag_query import buscar_codigo, _cliente as _chroma_cliente
+# _chroma_cliente es el MISMO PersistentClient que usa rag_query para consultar.
+# Reutilizarlo garantiza misma ruta y mismo embedding por defecto (all-MiniLM-L6-v2),
+# asi lo que guardamos en historia es recuperable por las mismas queries.
 from codigos_referencia import es_codigo_de_referencia, consultar_referencia
 
 load_dotenv()
@@ -639,3 +642,93 @@ def cite_applicable_standard(
     nota = f" Note: verify local adoption in {state}." if state else " Note: verify local adoption in the applicable jurisdiction."
 
     return {"citation": principal + nota}
+
+
+
+# =====================================================
+# FUNCION INTERNA: guardar_en_historia
+# Persiste un reporte a collection_jrs_history en ChromaDB para que el
+# reporte diario (6 AM) y el dashboard puedan leerlo despues. NO es un
+# tool del modelo: la llama agent.py al cerrar un crew_update.
+# Usa el cliente de rag_query (mismo path, mismo embedding por defecto)
+# para que lo guardado sea recuperable por las mismas queries.
+# =====================================================
+COLECCION_HISTORIA = "collection_jrs_history"
+
+
+def guardar_en_historia(
+    report_text: str,
+    doc_type: str = "crew_update",
+    date: str = "",
+    risk_level: str = "",
+    clients: str = "",
+    projects: str = "",
+    source_email_id: str = "",
+) -> dict:
+    if not report_text or not report_text.strip():
+        return {"saved": False, "reason": "report_text vacio"}
+
+    fecha = date or datetime.now().strftime("%Y-%m-%d")
+    doc_id = (
+        f"{doc_type}_{source_email_id}"
+        if source_email_id
+        else f"{doc_type}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+    )
+
+    # ChromaDB exige metadatos escalares (str/int/float/bool), no listas.
+    metadata = {
+        "doc_type": doc_type,
+        "date": fecha,
+        "source": "agent_live",
+        "risk_level": (risk_level or "").upper(),
+        "clients": clients or "",
+        "projects": projects or "",
+        "email_id": source_email_id or "",
+        "ingested_at": datetime.now().isoformat(timespec="seconds"),
+    }
+
+    try:
+        coleccion = _chroma_cliente.get_or_create_collection(name=COLECCION_HISTORIA)
+        # upsert: si el mismo correo se reprocesara, sobrescribe en vez de duplicar.
+        coleccion.upsert(
+            documents=[report_text],
+            ids=[doc_id],
+            metadatas=[metadata],
+        )
+        total = coleccion.count()
+        logger.info(
+            f"[guardar_en_historia] guardado {doc_id} en {COLECCION_HISTORIA} "
+            f"(total chunks: {total})"
+        )
+        return {"saved": True, "doc_id": doc_id, "collection_count": total}
+    except Exception as e:
+        logger.error(f"[guardar_en_historia] error guardando {doc_id}: {e}")
+        return {"saved": False, "doc_id": doc_id, "error": str(e)}
+
+
+# =====================================================
+# FUNCION INTERNA: marcar_como_procesado
+# Cambia la etiqueta del correo AI-Agent -> AI-Procesado SIN crear borrador.
+# Necesaria para cerrar correos que no generan respuesta (crew updates) y
+# evitar que se reprocesen en cada ciclo (bucle infinito).
+# Replica el relabel que hoy vive dentro de create_gmail_draft.
+# =====================================================
+def marcar_como_procesado(original_email_id: str) -> dict:
+    try:
+        service = obtener_servicio_gmail()
+        id_entrada = obtener_id_etiqueta(service, ETIQUETA_PENDIENTE)
+        id_salida = obtener_id_etiqueta(service, ETIQUETA_PROCESADO)
+        if not (id_entrada and id_salida):
+            return {"label_changed": False, "reason": "etiquetas no encontradas"}
+        service.users().messages().modify(
+            userId="me",
+            id=original_email_id,
+            body={"removeLabelIds": [id_entrada], "addLabelIds": [id_salida]},
+        ).execute()
+        logger.info(
+            f"[marcar_como_procesado] {original_email_id}: AI-Agent -> AI-Procesado"
+        )
+        return {"label_changed": True}
+    except Exception as e:
+        logger.error(f"[marcar_como_procesado] {original_email_id}: {e}")
+        return {"label_changed": False, "error": str(e)}
