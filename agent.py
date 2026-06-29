@@ -681,6 +681,7 @@ def asegurar_chromadb():
 # =====================================================
 async def main():
     logger.info("JRS Central Operations Intelligence System - INICIADO en produccion")
+    logger.info(">>> BUILD CHECK 1814: crew_update guard activo <<<")
     logger.info(f"   Timezone:       {TIMEZONE}")
     logger.info(f"   ChromaDB path:  {CHROMA_DB_PATH}")
     logger.info(f"   Modelo:         {MODELO}")
