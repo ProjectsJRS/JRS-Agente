@@ -24,6 +24,7 @@ from tools import (
     obtener_servicio_gmail,
     obtener_id_etiqueta,
     extraer_cuerpo_correo,
+    extraer_texto_de_adjuntos,
     classify_email,
     search_drive,
     generate_report,
@@ -498,6 +499,13 @@ def leer_correos_pendientes(max_results: int = 10) -> list:
             fecha = next((h['value'] for h in headers if h['name'] == 'Date'), '')
             cc = next((h['value'] for h in headers if h['name'].lower() == 'cc'), '')
             cuerpo = extraer_cuerpo_correo(msg['payload'])
+
+            # CRITICO: leer tambien los adjuntos (PDF/Word/Excel/TXT/imagen) y
+            # pegarlos al cuerpo. Este es el camino que el loop principal usa de
+            # verdad; sin esto el agente NUNCA ve el contenido de los adjuntos.
+            texto_adjuntos = extraer_texto_de_adjuntos(service, mensaje['id'], msg['payload'])
+            if texto_adjuntos:
+                cuerpo = cuerpo + "\n\n--- ARCHIVOS ADJUNTOS AL CORREO ---" + texto_adjuntos
 
             correos.append({
                 'id': mensaje['id'],

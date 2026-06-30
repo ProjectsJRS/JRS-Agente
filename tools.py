@@ -195,11 +195,39 @@ def listar_adjuntos(payload):
     return adjuntos
 
 
+def _ocr_imagen(raw_bytes, filename=""):
+    """Extrae texto de una imagen (PNG/JPG/etc.) usando OCR (Tesseract).
+    Degrada con gracia: si pytesseract/Pillow o el binario de Tesseract no
+    estan instalados, devuelve una nota clara en vez de reventar.
+    Para que el OCR funcione en Railway hay que instalar el paquete de
+    SISTEMA 'tesseract-ocr' en el build (ademas de pytesseract y Pillow)."""
+    import io
+    try:
+        import pytesseract
+        from PIL import Image
+    except Exception:
+        return ("[IMAGEN recibida pero OCR no disponible: faltan pytesseract/"
+                "Pillow. Instalar para poder leer imagenes.]")
+    try:
+        img = Image.open(io.BytesIO(raw_bytes))
+        texto = (pytesseract.image_to_string(img) or "").strip()
+        if not texto:
+            return ("[IMAGEN procesada con OCR pero sin texto legible "
+                    "(¿foto o plano sin texto?); requiere revision humana.]")
+        return texto
+    except pytesseract.TesseractNotFoundError:
+        return ("[IMAGEN recibida pero el motor Tesseract no esta instalado en "
+                "el sistema. En Railway agregar 'tesseract-ocr' al build.]")
+    except Exception as e:
+        return f"[Error de OCR en la imagen '{filename}': {e}]"
+
+
 def extraer_texto_de_adjuntos(service, id_correo, payload, max_chars=20000):
     """
     Descarga cada adjunto del correo y extrae su texto.
-    Soporta PDF, DOCX y TXT/CSV. Para otros tipos (imagenes, etc.) deja una
-    nota indicando que requiere revision humana.
+    Soporta PDF, Word (.docx), Excel (.xlsx/.xlsm), TXT/CSV e imagenes
+    (PNG/JPG/etc. via OCR). Para tipos no soportados deja una nota indicando
+    que requiere revision humana.
 
     Devuelve un unico string listo para concatenar al cuerpo del correo.
     Si no hay adjuntos, devuelve string vacio ''.
@@ -241,20 +269,45 @@ def extraer_texto_de_adjuntos(service, id_correo, payload, max_chars=20000):
         # 2) Extraer texto segun el tipo de archivo.
         texto = ''
         try:
+            # --- PDF ---
             if nombre.endswith('.pdf') or 'pdf' in mime:
                 from pypdf import PdfReader
                 lector = PdfReader(io.BytesIO(raw))
                 texto = '\n'.join((p.extract_text() or '') for p in lector.pages).strip()
+
+            # --- Word (.docx) ---
             elif nombre.endswith('.docx'):
                 from docx import Document
                 doc = Document(io.BytesIO(raw))
                 texto = '\n'.join(p.text for p in doc.paragraphs).strip()
+
+            # --- Excel (.xlsx / .xlsm) ---
+            elif nombre.endswith(('.xlsx', '.xlsm')) or 'spreadsheetml' in mime:
+                from openpyxl import load_workbook
+                wb = load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+                lineas = []
+                for hoja in wb.worksheets:
+                    lineas.append(f"[Hoja: {hoja.title}]")
+                    for fila in hoja.iter_rows(values_only=True):
+                        celdas = [str(c) for c in fila if c is not None]
+                        if celdas:
+                            lineas.append(" | ".join(celdas))
+                texto = "\n".join(lineas).strip()
+
+            # --- Texto plano / CSV ---
             elif nombre.endswith(('.txt', '.csv')):
                 texto = raw.decode('utf-8', errors='ignore').strip()
+
+            # --- Imagenes (PNG/JPG/...) via OCR ---
+            elif nombre.endswith(('.png', '.jpg', '.jpeg', '.tif', '.tiff',
+                                  '.bmp', '.gif')) or mime.startswith('image/'):
+                texto = _ocr_imagen(raw, filename)
+
             else:
                 bloques.append(
-                    f"\n[Adjunto '{filename}' ({mime}) recibido pero no es "
-                    f"texto procesable; requiere revision humana.]"
+                    f"\n[Adjunto '{filename}' ({mime}) recibido pero no es un "
+                    f"tipo soportado (PDF/Word/Excel/TXT/imagen); requiere "
+                    f"revision humana.]"
                 )
                 continue
         except Exception as e:
@@ -366,8 +419,22 @@ def classify_email(subject: str, body: str, sender: str) -> dict:
 
     señales_inspeccion = ["inspector", "city of", "building dept",
                           "code enforcement", "fire marshal", "inspection report"]
-    señales_vendor = ["invoice", "po number", "purchase order",
-                      "net 30", "quote", "estimate attached"]
+    # Solicitud de cotización: alguien quiere que JRS COTICE (no es una factura).
+    # Se evalúa ANTES que vendor para que "quote"/"estimate" no caiga en vendor.
+    señales_cotizacion = [
+        "quote needed", "need a quote", "need an estimate", "estimate needed",
+        "request for quote", "request a quote", "request an estimate",
+        "quote request", "estimate request", "rfq", "request for bid",
+        "bid request", "please quote", "please prepare a quote",
+        "prepare a quote", "can you quote", "send me a quote",
+        "send a quote", "looking for a quote", "pricing request",
+        "need pricing", "quote for", "estimate for", "bid for",
+    ]
+    # Vendor = facturación de un proveedor hacia JRS, o un proveedor que nos
+    # manda SU cotización (estimate/quote attached). NO una solicitud de quote.
+    señales_vendor = ["invoice", "po number", "purchase order", "net 30",
+                      "amount due", "payment due", "remittance",
+                      "estimate attached", "quote attached"]
     señales_crew = ["crew", "site", "job site", "foreman", "completed tonight",
                     "overnight", "crew leader", "buenas", "jefe", "terminamos"]
     señales_cliente = ["project manager", "facilities manager",
@@ -377,6 +444,10 @@ def classify_email(subject: str, body: str, sender: str) -> dict:
         categoria = "inspeccion"
         confianza = 85
         razones.append("Señales claras de inspección/regulación")
+    elif any(s in texto_completo for s in señales_cotizacion):
+        categoria = "cotizacion"
+        confianza = 85
+        razones.append("Solicitud de cotización/estimado (quote/bid request)")
     elif any(s in texto_completo for s in señales_vendor):
         categoria = "vendor"
         confianza = 80
