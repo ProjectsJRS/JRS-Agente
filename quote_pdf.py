@@ -44,6 +44,7 @@
 # -------------------------------------------------------------------
 
 import os
+from xml.sax.saxutils import escape
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
@@ -61,6 +62,17 @@ GOLD = colors.HexColor("#C8922A")      # dorado del logo (acentos)
 LIGHT = colors.HexColor("#EEF2F7")     # gris-azul muy claro (filas)
 DARK = colors.HexColor("#222222")      # texto principal
 MUTED = colors.HexColor("#666666")     # texto secundario
+
+
+def _esc(s):
+    """Escapa &, <, > para que reportlab no rompa con nombres como 'H&M'
+    ni interprete texto del usuario como markup XML."""
+    return escape("" if s is None else str(s))
+
+
+def _basis_label(quote_data):
+    """Subtitulo 'basis' honesto. Si no se especifica, asumimos labor-only."""
+    return str(quote_data.get("basis") or "Labor-Only Subcontractor Quote")
 
 
 def _estilos():
@@ -147,8 +159,8 @@ def _encabezado(quote_data, est, logo_path):
 
     derecha = Paragraph(
         f"<b>QUOTE</b><br/>"
-        f"# {quote_data.get('quote_number', 'TBD')}<br/>"
-        f"{quote_data.get('date', '')}",
+        f"# {_esc(quote_data.get('quote_number', 'TBD'))}<br/>"
+        f"{_esc(quote_data.get('date', ''))}",
         est["quotemeta"])
 
     tabla = Table([[izquierda, derecha]], colWidths=[4.2 * inch, 2.8 * inch])
@@ -169,9 +181,10 @@ def _bloque_meta(quote_data, est):
         ("LOCATION", quote_data.get("location", "")),
         ("PREPARED BY", quote_data.get("prepared_by", "")),
         ("PHONE", quote_data.get("phone", "")),
+        ("BASIS", _basis_label(quote_data)),
     ]
     datos = [
-        [Paragraph(lbl, est["meta_label"]), Paragraph(str(val), est["meta_val"])]
+        [Paragraph(lbl, est["meta_label"]), Paragraph(_esc(val), est["meta_val"])]
         for lbl, val in filas if str(val).strip()
     ]
     tabla = Table(datos, colWidths=[1.3 * inch, 5.7 * inch])
@@ -191,7 +204,7 @@ def _seccion(titulo, est):
 def _vinetas(items, est):
     flow = []
     for it in items:
-        flow.append(Paragraph(str(it), est["bullet"], bulletText="•"))
+        flow.append(Paragraph(_esc(it), est["bullet"], bulletText="•"))
     return flow
 
 
@@ -210,11 +223,11 @@ def _tabla_partidas(line_items, est):
     for i, li in enumerate(line_items, start=1):
         filas.append([
             Paragraph(str(i), est["cellL"]),
-            Paragraph(str(li.get("description", "")), est["cellL"]),
-            Paragraph(str(li.get("qty", "")), est["cellR"]),
-            Paragraph(str(li.get("unit", "")), est["cellL"]),
-            Paragraph(str(li.get("unit_price", "")), est["cellR"]),
-            Paragraph(str(li.get("line_total", "")), est["cellR"]),
+            Paragraph(_esc(li.get("description", "")), est["cellL"]),
+            Paragraph(_esc(li.get("qty", "")), est["cellR"]),
+            Paragraph(_esc(li.get("unit", "")), est["cellL"]),
+            Paragraph(_esc(li.get("unit_price", "")), est["cellR"]),
+            Paragraph(_esc(li.get("line_total", "")), est["cellR"]),
         ])
 
     tabla = Table(
@@ -246,12 +259,14 @@ def _tabla_totales(quote_data, est):
     filas = []
     if quote_data.get("labor_subtotal"):
         filas.append(["Labor subtotal", quote_data["labor_subtotal"]])
+    if quote_data.get("materials_subtotal"):
+        filas.append(["Materials subtotal (JRS-furnished)", quote_data["materials_subtotal"]])
     if quote_data.get("travel_subtotal"):
         filas.append(["Travel / lodging / equipment", quote_data["travel_subtotal"]])
 
     datos = [
         [Paragraph(lbl, est["body"]),
-         Paragraph(str(val), ParagraphStyle("r", parent=est["body"], alignment=TA_RIGHT))]
+         Paragraph(_esc(val), ParagraphStyle("r", parent=est["body"], alignment=TA_RIGHT))]
         for lbl, val in filas
     ]
     bloque = []
@@ -267,8 +282,8 @@ def _tabla_totales(quote_data, est):
     if quote_data.get("total_text"):
         bloque.append(Spacer(1, 6))
         caja = Table(
-            [[Paragraph("BUDGETARY LABOR-ONLY TOTAL", est["meta_label"]),
-              Paragraph(str(quote_data["total_text"]),
+            [[Paragraph("TOTAL", est["meta_label"]),
+              Paragraph(_esc(quote_data["total_text"]),
                         ParagraphStyle("tot", parent=est["total"], alignment=TA_RIGHT))]],
             colWidths=[3.5 * inch, 3.5 * inch])
         caja.setStyle(TableStyle([
@@ -291,7 +306,7 @@ def _pie(canvas, doc):
     canvas.setFillColor(MUTED)
     canvas.drawString(
         0.75 * inch, 0.5 * inch,
-        "JRS Retail Services  |  Labor-Only Subcontractor Quote  |  Confidential")
+        "JRS Retail Services  |  Commercial Retail Construction Quote  |  Confidential")
     canvas.drawRightString(
         7.75 * inch, 0.5 * inch, f"Page {doc.page}")
     canvas.setStrokeColor(colors.HexColor("#CCD4DE"))
@@ -327,23 +342,23 @@ def generar_pdf_cotizacion(quote_data: dict, output_path: str,
         flow.append(_seccion("1. PROJECT SUMMARY", est))
         for parrafo in str(quote_data["project_summary"]).split("\n"):
             if parrafo.strip():
-                flow.append(Paragraph(parrafo.strip(), est["body"]))
+                flow.append(Paragraph(_esc(parrafo.strip()), est["body"]))
 
     # --- 2. Scope of Work Included ---
     if quote_data.get("scope_items"):
-        flow.append(_seccion("2. SCOPE OF WORK INCLUDED (LABOR ONLY)", est))
+        flow.append(_seccion("2. SCOPE OF WORK INCLUDED", est))
         flow.extend(_vinetas(quote_data["scope_items"], est))
 
     # --- 3. Estimate Breakdown ---
     if quote_data.get("line_items"):
-        flow.append(_seccion("3. ESTIMATE BREAKDOWN (LABOR-ONLY SELL RATES)", est))
+        flow.append(_seccion("3. ESTIMATE BREAKDOWN", est))
         flow.append(_tabla_partidas(quote_data["line_items"], est))
 
     # --- 4. Travel / Lodging / Equipment ---
     if quote_data.get("travel_items"):
         flow.append(_seccion("4. TRAVEL / LODGING / EQUIPMENT (ALLOWANCES)", est))
-        datos = [[Paragraph(str(t.get("description", "")), est["cellL"]),
-                  Paragraph(str(t.get("amount", "")), est["cellR"])]
+        datos = [[Paragraph(_esc(t.get("description", "")), est["cellL"]),
+                  Paragraph(_esc(t.get("amount", "")), est["cellR"])]
                  for t in quote_data["travel_items"]]
         t = Table(datos, colWidths=[6.0 * inch, 1.0 * inch])
         t.setStyle(TableStyle([
@@ -397,7 +412,7 @@ def generar_pdf_cotizacion(quote_data: dict, output_path: str,
         flow.append(HRFlowable(width="100%", thickness=0.5,
                                color=colors.HexColor("#CCD4DE")))
         flow.append(Spacer(1, 4))
-        flow.append(Paragraph("COMPLIANCE NOTE: " + str(quote_data["compliance_note"]),
+        flow.append(Paragraph("COMPLIANCE NOTE: " + _esc(quote_data["compliance_note"]),
                               est["note"]))
 
     doc.build(flow, onFirstPage=_pie, onLaterPages=_pie)
