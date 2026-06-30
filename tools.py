@@ -5,9 +5,13 @@
 import os
 import json
 import base64
+import re
+import tempfile
 from typing import List, Dict, Optional, Annotated
 from datetime import datetime
 from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.mime.application import MIMEApplication
 from dotenv import load_dotenv
 
 from google.auth.transport.requests import Request
@@ -154,6 +158,129 @@ def extraer_cuerpo_correo(payload):
 
     return '(sin cuerpo)'
 
+
+# =====================================================
+# LECTURA DE ADJUNTOS (PDF, DOCX, TXT)
+# =====================================================
+def listar_adjuntos(payload):
+    """
+    Recorre TODA la estructura MIME del correo (incluyendo partes anidadas)
+    y devuelve la lista de adjuntos encontrados.
+
+    Cada adjunto es un dict con:
+      - filename:     nombre del archivo (ej: 'SOW_San_Bernardino.pdf')
+      - mimeType:     tipo (ej: 'application/pdf')
+      - attachmentId: id para descargarlo (None si viene inline)
+      - data:         bytes en base64 (solo si es pequeno e inline)
+
+    Un adjunto real SIEMPRE tiene filename no vacio. Eso lo distingue de las
+    partes text/plain y text/html que son el cuerpo del correo.
+    """
+    adjuntos = []
+
+    def recorrer(parte):
+        filename = (parte.get('filename') or '').strip()
+        body = parte.get('body', {})
+        if filename:
+            adjuntos.append({
+                'filename': filename,
+                'mimeType': parte.get('mimeType', ''),
+                'attachmentId': body.get('attachmentId'),
+                'data': body.get('data'),
+            })
+        for sub in parte.get('parts', []):
+            recorrer(sub)
+
+    recorrer(payload)
+    return adjuntos
+
+
+def extraer_texto_de_adjuntos(service, id_correo, payload, max_chars=20000):
+    """
+    Descarga cada adjunto del correo y extrae su texto.
+    Soporta PDF, DOCX y TXT/CSV. Para otros tipos (imagenes, etc.) deja una
+    nota indicando que requiere revision humana.
+
+    Devuelve un unico string listo para concatenar al cuerpo del correo.
+    Si no hay adjuntos, devuelve string vacio ''.
+
+    Nota: el scope 'gmail.modify' ya permite descargar adjuntos, no requiere
+    permisos nuevos ni re-autenticacion.
+    """
+    import io
+
+    adjuntos = listar_adjuntos(payload)
+    if not adjuntos:
+        return ''
+
+    bloques = []
+    for adj in adjuntos:
+        filename = adj['filename']
+        mime = (adj.get('mimeType') or '').lower()
+        nombre = filename.lower()
+
+        # 1) Obtener los bytes. Los PDF casi siempre vienen por attachmentId,
+        #    no inline, por eso hace falta una llamada extra a la API.
+        data_b64 = adj.get('data')
+        if not data_b64 and adj.get('attachmentId'):
+            try:
+                att = service.users().messages().attachments().get(
+                    userId='me',
+                    messageId=id_correo,
+                    id=adj['attachmentId'],
+                ).execute()
+                data_b64 = att.get('data')
+            except Exception as e:
+                bloques.append(f"\n[No se pudo descargar el adjunto '{filename}': {e}]")
+                continue
+        if not data_b64:
+            continue
+
+        raw = base64.urlsafe_b64decode(data_b64.encode('UTF-8'))
+
+        # 2) Extraer texto segun el tipo de archivo.
+        texto = ''
+        try:
+            if nombre.endswith('.pdf') or 'pdf' in mime:
+                from pypdf import PdfReader
+                lector = PdfReader(io.BytesIO(raw))
+                texto = '\n'.join((p.extract_text() or '') for p in lector.pages).strip()
+            elif nombre.endswith('.docx'):
+                from docx import Document
+                doc = Document(io.BytesIO(raw))
+                texto = '\n'.join(p.text for p in doc.paragraphs).strip()
+            elif nombre.endswith(('.txt', '.csv')):
+                texto = raw.decode('utf-8', errors='ignore').strip()
+            else:
+                bloques.append(
+                    f"\n[Adjunto '{filename}' ({mime}) recibido pero no es "
+                    f"texto procesable; requiere revision humana.]"
+                )
+                continue
+        except Exception as e:
+            bloques.append(f"\n[Error leyendo el adjunto '{filename}': {e}]")
+            continue
+
+        if not texto:
+            bloques.append(
+                f"\n[El adjunto '{filename}' no contiene texto extraible "
+                f"(probable escaneo/imagen); requiere revision humana.]"
+            )
+            continue
+
+        # Recortar para no reventar el contexto de Claude con adjuntos enormes.
+        if len(texto) > max_chars:
+            texto = texto[:max_chars] + "\n[...adjunto recortado por longitud...]"
+
+        bloques.append(
+            f"\n\n===== INICIO ADJUNTO: {filename} =====\n"
+            f"{texto}\n"
+            f"===== FIN ADJUNTO: {filename} ====="
+        )
+
+    return ''.join(bloques)
+
+
 # =====================================================
 # HERRAMIENTA 1: read_tagged_emails
 # =====================================================
@@ -183,6 +310,13 @@ def read_tagged_emails(max_results: int = 10) -> dict:
             remitente = next((h['value'] for h in headers if h['name'] == 'From'), '(sin remitente)')
             fecha = next((h['value'] for h in headers if h['name'] == 'Date'), '')
             cuerpo = extraer_cuerpo_correo(msg['payload'])
+
+            # Leer tambien los adjuntos (PDF, DOCX, TXT) y pegarlos al cuerpo,
+            # para que Claude reciba el contenido del SOW/documento, no solo la
+            # nota del correo. Si no hay adjuntos, texto_adjuntos queda en ''.
+            texto_adjuntos = extraer_texto_de_adjuntos(service, mensaje['id'], msg['payload'])
+            if texto_adjuntos:
+                cuerpo = cuerpo + "\n\n--- ARCHIVOS ADJUNTOS AL CORREO ---" + texto_adjuntos
 
             correos.append({
                 'id': mensaje['id'],
@@ -415,6 +549,125 @@ def create_gmail_draft(
 
     except Exception as e:
         return {"draft_id": "", "status": f"error: {e}", "label_changed": False}
+
+
+# =====================================================
+# HERRAMIENTA: send_quote_to_richard
+# Envía DIRECTAMENTE a Richard (NO borrador) la cotización con el PDF
+# profesional adjunto. Doble candado de seguridad:
+#   CANDADO 1: agent.py solo ofrece esta tool cuando el remitente es Richard.
+#   CANDADO 2: esta función SOLO envía a la dirección corporativa de Richard,
+#              sin importar lo que reciba. Nunca puede enviar a un cliente.
+# Es un envío INTERNO (Richard tiene acceso total y es el aprobador), por lo
+# que no viola la regla de oro de aprobación de envíos externos.
+# Replica el relabel AI-Agent -> AI-Procesado de create_gmail_draft.
+# =====================================================
+def _nombre_archivo_quote(quote_data: dict) -> str:
+    """Construye un nombre de archivo seguro:
+    JRS_Quote_Client_Location_Date.pdf"""
+    def limpiar(s):
+        s = re.sub(r'[^A-Za-z0-9]+', '-', str(s or '')).strip('-')
+        return s or 'NA'
+    partes = [
+        "JRS_Quote",
+        limpiar(quote_data.get("prepared_for", "")),
+        limpiar(quote_data.get("location", "")),
+        limpiar(quote_data.get("date", datetime.now().strftime("%Y-%m-%d"))),
+    ]
+    return "_".join(partes) + ".pdf"
+
+
+def send_quote_to_richard(
+    original_email_id: str,
+    subject: str,
+    intro_body: str,
+    quote_data: dict,
+    cc_emails: list = None,
+) -> dict:
+    # CANDADO 2: destinatario forzado a Richard corporativo. Ignoramos
+    # cualquier otra dirección. Envío interno, jamás a un cliente.
+    destinatario = RICHARD_CORPORATIVO
+
+    # Los CC ya vienen filtrados contra la whitelist por agent.py (Opción 1
+    # determinística). Aquí solo los colocamos en el header Cc del correo.
+    cc_emails = cc_emails or []
+
+    # Cargar el generador de PDF de forma perezosa: si faltara reportlab,
+    # solo falla la cotización, no todo el agente.
+    try:
+        from quote_pdf import generar_pdf_cotizacion
+    except Exception as e:
+        return {
+            "sent": False,
+            "error": f"Generador de PDF no disponible (¿falta reportlab?): {e}",
+        }
+
+    ruta_pdf = None
+    try:
+        # 1) Renderizar el PDF a un archivo temporal.
+        nombre_pdf = _nombre_archivo_quote(quote_data)
+        ruta_pdf = os.path.join(tempfile.gettempdir(), nombre_pdf)
+        generar_pdf_cotizacion(quote_data, ruta_pdf)
+        with open(ruta_pdf, "rb") as f:
+            pdf_bytes = f.read()
+
+        # 2) Construir el correo con el cuerpo de texto + PDF adjunto.
+        mensaje = MIMEMultipart()
+        mensaje['to'] = destinatario
+        if cc_emails:
+            mensaje['cc'] = ", ".join(cc_emails)
+        mensaje['subject'] = subject
+        mensaje.attach(MIMEText(intro_body or "", 'plain', 'utf-8'))
+        adjunto = MIMEApplication(pdf_bytes, _subtype='pdf')
+        adjunto.add_header('Content-Disposition', 'attachment', filename=nombre_pdf)
+        mensaje.attach(adjunto)
+
+        # 3) ENVIAR (no borrador) a Richard.
+        service = obtener_servicio_gmail()
+        raw = base64.urlsafe_b64encode(mensaje.as_bytes()).decode('utf-8')
+        enviado = service.users().messages().send(
+            userId='me', body={'raw': raw}
+        ).execute()
+        message_id = enviado.get('id', '')
+
+        # 4) Relabel AI-Agent -> AI-Procesado (igual que create_gmail_draft).
+        label_changed = False
+        try:
+            id_entrada = obtener_id_etiqueta(service, ETIQUETA_PENDIENTE)
+            id_salida = obtener_id_etiqueta(service, ETIQUETA_PROCESADO)
+            if id_entrada and id_salida and original_email_id:
+                service.users().messages().modify(
+                    userId='me',
+                    id=original_email_id,
+                    body={'removeLabelIds': [id_entrada], 'addLabelIds': [id_salida]},
+                ).execute()
+                label_changed = True
+        except Exception as e:
+            logger.warning(f"[send_quote_to_richard] no se cambió etiqueta: {e}")
+
+        logger.info(
+            f"[send_quote_to_richard] cotización enviada a {destinatario} "
+            f"(cc: {cc_emails or 'ninguno'}, msg {message_id}, adjunto {nombre_pdf})"
+        )
+        return {
+            "sent": True,
+            "message_id": message_id,
+            "recipient": destinatario,
+            "cc": cc_emails,
+            "pdf_filename": nombre_pdf,
+            "label_changed": label_changed,
+        }
+
+    except Exception as e:
+        logger.error(f"[send_quote_to_richard] error: {e}")
+        return {"sent": False, "error": str(e)}
+    finally:
+        # Borrar el PDF temporal (no crítico si falla).
+        try:
+            if ruta_pdf and os.path.exists(ruta_pdf):
+                os.remove(ruta_pdf)
+        except OSError:
+            pass
 
 
 # =====================================================

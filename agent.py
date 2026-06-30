@@ -28,6 +28,7 @@ from tools import (
     search_drive,
     generate_report,
     create_gmail_draft,
+    send_quote_to_richard,
     alert_if_critical,
     consult_building_code,
     verify_compliance,
@@ -48,6 +49,10 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 TIMEZONE = os.getenv("TIMEZONE", "America/Chicago")
 CHROMA_DB_PATH = os.getenv("CHROMA_DB_PATH", "./chroma_data")
 
+# El heartbeat vive en el mismo volumen persistente que ChromaDB.
+# En Railway CHROMA_DB_PATH = /data/chroma_db  -> heartbeat en /data/heartbeat.txt
+# En local  CHROMA_DB_PATH = ./chroma_data     -> heartbeat en ./heartbeat.txt
+HEARTBEAT_FILE = os.path.join(os.path.dirname(CHROMA_DB_PATH) or ".", "heartbeat.txt")
 MODELO = os.getenv("AGENT_MODEL", "claude-opus-4-8")
 SLEEP_BETWEEN_CYCLES_SECONDS = int(os.getenv("SLEEP_BETWEEN_CYCLES_SECONDS", "300"))
 MAX_EMAILS_PER_CYCLE = int(os.getenv("MAX_EMAILS_PER_CYCLE", "10"))
@@ -254,9 +259,118 @@ TOOLS_DEFINITION = [
 ]
 
 # =====================================================
+# HERRAMIENTA EXCLUSIVA DE RICHARD: send_quote_to_richard
+# NO va en TOOLS_DEFINITION base. agent.py la agrega a la caja de
+# herramientas SOLO cuando el remitente es Richard (CANDADO 1). Asi el
+# modelo ni siquiera tiene la opcion de enviar directo para otros remitentes.
+# =====================================================
+SEND_QUOTE_TOOL_DEF = {
+    "name": "send_quote_to_richard",
+    "description": (
+        "Sends a finished labor-only quote DIRECTLY to Richard (NOT a draft) with a "
+        "professional PDF attached. Use this ONLY when Richard is requesting a quote, "
+        "estimate, bid, or pricing. Provide the email subject, a short intro_body for "
+        "the email to Richard, and the full structured quote_data (Section 9.7). The "
+        "system renders the PDF and emails it to Richard automatically."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "original_email_id": {"type": "string", "description": "ID of the original email"},
+            "subject": {"type": "string", "description": "Email subject line"},
+            "intro_body": {
+                "type": "string",
+                "description": "Short email body to Richard introducing the attached quote PDF",
+            },
+            "quote_data": {
+                "type": "object",
+                "description": "Structured quote content rendered into the PDF (Section 9.7 fields)",
+                "properties": {
+                    "quote_number": {"type": "string"},
+                    "date": {"type": "string"},
+                    "prepared_for": {"type": "string"},
+                    "project_name": {"type": "string"},
+                    "store_number": {"type": "string"},
+                    "location": {"type": "string"},
+                    "prepared_by": {"type": "string"},
+                    "phone": {"type": "string"},
+                    "project_summary": {"type": "string"},
+                    "scope_items": {"type": "array", "items": {"type": "string"}},
+                    "line_items": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "description": {"type": "string"},
+                                "qty": {"type": "string"},
+                                "unit": {"type": "string"},
+                                "unit_price": {"type": "string"},
+                                "line_total": {"type": "string"},
+                            },
+                        },
+                    },
+                    "labor_subtotal": {"type": "string"},
+                    "travel_items": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "description": {"type": "string"},
+                                "amount": {"type": "string"},
+                            },
+                        },
+                    },
+                    "travel_subtotal": {"type": "string"},
+                    "total_text": {"type": "string"},
+                    "assumptions": {"type": "array", "items": {"type": "string"}},
+                    "exclusions": {"type": "array", "items": {"type": "string"}},
+                    "clarifications": {"type": "array", "items": {"type": "string"}},
+                    "terms": {"type": "array", "items": {"type": "string"}},
+                    "compliance_note": {"type": "string"},
+                },
+                "required": ["prepared_for", "project_name", "line_items", "total_text"],
+            },
+        },
+        "required": ["original_email_id", "subject", "intro_body", "quote_data"],
+    },
+}
+
+# =====================================================
+# FILTRO DETERMINISTICO DE CC CONTRA LA WHITELIST
+# El codigo (no Claude) decide a quien se copia. Toma el header Cc crudo
+# del correo de Richard y devuelve SOLO las direcciones que estan en la
+# whitelist. Cualquier direccion externa se descarta en silencio: asi,
+# aunque Richard copie por error a un cliente, nunca recibira la cotizacion.
+# Excluye tambien la cuenta del agente (projects@) y al propio Richard
+# (que ya es el destinatario principal 'to').
+# =====================================================
+def filtrar_cc_whitelist(cc_raw: str) -> list:
+    if not cc_raw:
+        return []
+    excluidos = {
+        "projects@jrsretailservices.com",
+        "richard@jrsretailservices.com",
+        "richardbodington2@gmail.com",
+    }
+    autorizados = []
+    # Los CC vienen separados por comas; cada uno puede ser 'Name <email>'.
+    for parte in cc_raw.split(','):
+        parte = parte.strip()
+        if not parte:
+            continue
+        check = verify_sender(parte)
+        if not check.get("is_internal"):
+            continue  # no esta en whitelist -> descartar (candado)
+        email = check.get("email", "")
+        if email and email not in excluidos and email not in autorizados:
+            autorizados.append(email)
+    return autorizados
+
+
+# =====================================================
 # EJECUTOR DE HERRAMIENTAS
 # =====================================================
-def ejecutar_herramienta(nombre: str, parametros: dict) -> str:
+def ejecutar_herramienta(nombre: str, parametros: dict, cc_autorizados: list = None) -> str:
     """
     Dispatcher: llama a la función correspondiente en tools.py
     y devuelve el resultado como string JSON.
@@ -300,6 +414,15 @@ def ejecutar_herramienta(nombre: str, parametros: dict) -> str:
                 subject=parametros.get("subject", ""),
                 body=parametros.get("body", ""),
                 is_external=parametros.get("is_external", True),
+            )
+
+        elif nombre == "send_quote_to_richard":
+            resultado = send_quote_to_richard(
+                original_email_id=parametros.get("original_email_id", ""),
+                subject=parametros.get("subject", ""),
+                intro_body=parametros.get("intro_body", ""),
+                quote_data=parametros.get("quote_data", {}),
+                cc_emails=cc_autorizados or [],
             )
 
         elif nombre == "alert_if_critical":
@@ -373,6 +496,7 @@ def leer_correos_pendientes(max_results: int = 10) -> list:
             asunto = next((h['value'] for h in headers if h['name'] == 'Subject'), '(sin asunto)')
             remitente = next((h['value'] for h in headers if h['name'] == 'From'), '(sin remitente)')
             fecha = next((h['value'] for h in headers if h['name'] == 'Date'), '')
+            cc = next((h['value'] for h in headers if h['name'].lower() == 'cc'), '')
             cuerpo = extraer_cuerpo_correo(msg['payload'])
 
             correos.append({
@@ -381,6 +505,7 @@ def leer_correos_pendientes(max_results: int = 10) -> list:
                 'subject': asunto,
                 'body': cuerpo,
                 'date': fecha,
+                'cc': cc,
             })
 
         return correos
@@ -449,10 +574,30 @@ def procesar_un_correo(correo: dict) -> dict:
             f"{contexto_remitente}"
         )
     else:
-        tools_para_este_correo = TOOLS_DEFINITION
+        # CANDADO 1: el envio directo a Richard SOLO existe en la caja de
+        # herramientas cuando el remitente es Richard. Lo identificamos por
+        # can_approve_external, que segun el system prompt (Section 3) es True
+        # UNICAMENTE para Richard.
+        es_de_richard = bool(sender_check.get("can_approve_external"))
+
+        if es_de_richard:
+            tools_para_este_correo = TOOLS_DEFINITION + [SEND_QUOTE_TOOL_DEF]
+            instruccion_richard = (
+                "This email is from RICHARD (owner and sole approver). If he is "
+                "requesting a QUOTE, ESTIMATE, BID, or PRICING, do NOT create a "
+                "draft. Instead build the full structured quote (Section 9.7) and "
+                "call send_quote_to_richard, which emails the quote directly to "
+                "Richard with a professional PDF attached. For any OTHER kind of "
+                "email from Richard, behave normally. "
+            )
+        else:
+            tools_para_este_correo = TOOLS_DEFINITION
+            instruccion_richard = ""
+
         instruccion = (
             "IMPORTANT: All reports, drafts and communications must be written in English only. "
             "Process the following email following the system prompt protocol. "
+            + instruccion_richard +
             "If the sender is external, prepare only a draft with the approval header. "
             "If you detect CRITICAL severity, send an immediate alert before continuing. "
             "Use the available tools to classify, search context, generate the report, "
@@ -460,6 +605,12 @@ def procesar_un_correo(correo: dict) -> dict:
             f"EMAIL_ID to use when modifying labels: {email_id}\n\n"
             f"{contexto_remitente}"
         )
+
+    # CC autorizados (solo whitelist) para copiar en la respuesta a Richard.
+    # Determinístico: el código filtra, Claude no decide destinatarios.
+    cc_autorizados = filtrar_cc_whitelist(correo.get('cc', ''))
+    if cc_autorizados:
+        logger.info(f"  CC autorizados (whitelist): {cc_autorizados}")
 
     # Agent Loop con Anthropic API
     messages = [{"role": "user", "content": instruccion}]
@@ -500,7 +651,7 @@ def procesar_un_correo(correo: dict) -> dict:
                         tool_use_id = bloque.id
 
                         logger.info(f"  Herramienta: {nombre_tool}")
-                        resultado = ejecutar_herramienta(nombre_tool, params_tool)
+                        resultado = ejecutar_herramienta(nombre_tool, params_tool, cc_autorizados)
 
                         # Guardar params del reporte (para la metadata de historia).
                         # Conservamos los del PRIMER generate_report; si por algo
@@ -513,6 +664,8 @@ def procesar_un_correo(correo: dict) -> dict:
                             resultado_dict = json.loads(resultado)
                             if nombre_tool == "create_gmail_draft" and resultado_dict.get("draft_id"):
                                 draft_id = resultado_dict["draft_id"]
+                            if nombre_tool == "send_quote_to_richard" and resultado_dict.get("message_id"):
+                                draft_id = "sent:" + resultado_dict["message_id"]
                             if nombre_tool == "generate_report" and resultado_dict.get("report"):
                                 # Acumular (no sobrescribir): si hubiera mas de un
                                 # reporte, se conservan TODOS en historia.
@@ -675,13 +828,25 @@ def asegurar_chromadb():
         except OSError:
             pass
 
+# =====================================================
+# HEARTBEAT — señal de vida para el dashboard
+# Escribe la hora actual en heartbeat.txt en cada ciclo. El dashboard
+# lo lee: si el ultimo latido fue hace <10 min, el agente esta vivo.
+# Falla en silencio: un heartbeat que no se pudo escribir nunca debe
+# tumbar el ciclo de procesamiento de correos.
+# =====================================================
+def escribir_heartbeat():
+    try:
+        with open(HEARTBEAT_FILE, "w", encoding="utf-8") as f:
+            f.write(datetime.now().isoformat())
+    except Exception as e:
+        logger.warning(f"No se pudo escribir heartbeat: {e}")
 
 # =====================================================
 # FUNCION PRINCIPAL
 # =====================================================
 async def main():
     logger.info("JRS Central Operations Intelligence System - INICIADO en produccion")
-    logger.info(">>> BUILD CHECK 1814: crew_update guard activo <<<")
     logger.info(f"   Timezone:       {TIMEZONE}")
     logger.info(f"   ChromaDB path:  {CHROMA_DB_PATH}")
     logger.info(f"   Modelo:         {MODELO}")
@@ -694,6 +859,7 @@ async def main():
 
     while True:
         try:
+            escribir_heartbeat()  # señal de vida para el dashboard, cada ciclo
             logger.info("Buscando correos pendientes...")
             correos = leer_correos_pendientes(max_results=MAX_EMAILS_PER_CYCLE)
 
