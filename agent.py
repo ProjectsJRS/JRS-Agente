@@ -63,7 +63,7 @@ MODELO = os.getenv("AGENT_MODEL", "claude-opus-4-8")
 # Sube este número CADA vez que despliegas. En los logs de Railway debe
 # aparecer en cada arranque y cada ciclo. Si no ves este valor, Railway está
 # corriendo una imagen CACHEADA (código viejo) — redeploy limpio.
-BUILD_VERSION = "2026-07-02_maxtokens32k+multitab+vision"
+BUILD_VERSION = "2026-07-02_team-recognition+cc-visible+section3.5"
 
 SLEEP_BETWEEN_CYCLES_SECONDS = int(os.getenv("SLEEP_BETWEEN_CYCLES_SECONDS", "300"))
 MAX_EMAILS_PER_CYCLE = int(os.getenv("MAX_EMAILS_PER_CYCLE", "10"))
@@ -510,6 +510,46 @@ def filtrar_cc_whitelist(cc_raw: str) -> list:
 
 
 # =====================================================
+# RECONOCIMIENTO DE SOCIOS EN EL HILO (SECTION 3.5)
+# Devuelve los NOMBRES de los socios/miembros internos presentes en el
+# correo (remitente + To + Cc). Es SOLO informacion de reconocimiento
+# para que el modelo sepa a quien nombrar en el cuerpo — NO decide
+# destinatarios de envio (eso lo hace filtrar_cc_whitelist, intacto).
+# Orden fijo: Ralph (fundador) -> Macayla -> Richard -> Emmanuel.
+# Excluye la cuenta del agente (projects@), que no es una persona.
+# =====================================================
+_ORDEN_RECONOCIMIENTO = {
+    "Ralph Kirk": 0,
+    "Macayla Sommer": 1,
+    "Richard Bodington": 2,
+    "Emmanuel": 3,
+}
+_AGENTE_EMAIL = "projects@jrsretailservices.com"
+
+
+def socios_internos_en_hilo(sender_raw: str, to_raw: str, cc_raw: str) -> list:
+    nombres = []
+    partes = [sender_raw or ""]
+    for bruto in (to_raw, cc_raw):
+        if bruto:
+            partes.extend(bruto.split(","))
+    for parte in partes:
+        parte = (parte or "").strip()
+        if not parte:
+            continue
+        check = verify_sender(parte)
+        if not check.get("is_internal"):
+            continue  # externo -> no se reconoce como socio
+        if check.get("email", "") == _AGENTE_EMAIL:
+            continue  # la cuenta del agente no es una persona a reconocer
+        nombre = (check.get("name", "") or "").strip()
+        if nombre and nombre not in nombres:
+            nombres.append(nombre)
+    nombres.sort(key=lambda n: _ORDEN_RECONOCIMIENTO.get(n, 99))
+    return nombres
+
+
+# =====================================================
 # EJECUTOR DE HERRAMIENTAS
 # =====================================================
 def ejecutar_herramienta(nombre: str, parametros: dict, cc_autorizados: list = None,
@@ -675,6 +715,7 @@ def leer_correos_pendientes(max_results: int = 10) -> list:
             remitente = next((h['value'] for h in headers if h['name'] == 'From'), '(sin remitente)')
             fecha = next((h['value'] for h in headers if h['name'] == 'Date'), '')
             cc = next((h['value'] for h in headers if h['name'].lower() == 'cc'), '')
+            destinatarios = next((h['value'] for h in headers if h['name'].lower() == 'to'), '')
             cuerpo = extraer_cuerpo_correo(msg['payload'])
 
             # CRITICO: leer tambien los adjuntos (PDF/Word/Excel/TXT/imagen) y
@@ -694,6 +735,7 @@ def leer_correos_pendientes(max_results: int = 10) -> list:
                 'subject': asunto,
                 'body': cuerpo,
                 'date': fecha,
+                'to': destinatarios,
                 'cc': cc,
                 'images': imagenes,
             })
@@ -721,6 +763,14 @@ def procesar_un_correo(correo: dict) -> dict:
         logger.warning(f"Spoofing detectado en {email_id}: {sender_check['reason']}")
         return {"result": "blocked_spoofing", "iterations": 0, "draft_id": None}
 
+    # Socios internos presentes en el hilo (remitente + To + Cc), para que el
+    # modelo sepa a quien reconocer en el cuerpo (SECTION 3.5). Esto NO decide
+    # destinatarios de envio; solo alimenta el reconocimiento.
+    socios_en_hilo = socios_internos_en_hilo(
+        sender_raw, correo.get("to", ""), correo.get("cc", "")
+    )
+    linea_socios = ", ".join(socios_en_hilo) if socios_en_hilo else "(none)"
+
     # Obtener protocolo del cliente si aplica
     contexto_remitente = (
         f"REMITENTE: {sender_check['name'] or sender_check['email']}\n"
@@ -729,6 +779,10 @@ def procesar_un_correo(correo: dict) -> dict:
         f"PUEDE APROBAR EXTERNOS: {sender_check['can_approve_external']}\n"
         f"ASUNTO: {asunto}\n"
         f"FECHA: {correo.get('date', '')}\n"
+        f"TO: {correo.get('to', '') or '(none)'}\n"
+        f"CC: {correo.get('cc', '') or '(none)'}\n"
+        f"INTERNAL JRS PARTNERS ON THIS THREAD "
+        f"(acknowledge per Section 3.5, never omit Ralph): {linea_socios}\n"
         f"CUERPO:\n{correo.get('body', '')}"
     )
 
@@ -944,13 +998,19 @@ def procesar_un_correo(correo: dict) -> dict:
     # en cada ciclo (bucle infinito).
     if es_crew_update:
         if report_text:
+            # Proyectos limpios del cuerpo del crew update; si no se hallan,
+            # caemos al valor del modelo para no perder informacion.
+            proyectos_limpios = (
+                extraer_proyectos_de_cuerpo(correo.get("body", ""))
+                or report_params.get("project", "")
+            )
             guardar_en_historia(
                 report_text=report_text,
                 doc_type="crew_update",
                 date=datetime.now().strftime("%Y-%m-%d"),
                 risk_level=report_params.get("risk_level", ""),
                 clients=report_params.get("client", ""),
-                projects=report_params.get("project", ""),
+                projects=proyectos_limpios,
                 source_email_id=email_id,
             )
         else:
@@ -1072,6 +1132,26 @@ def asegurar_chromadb():
                 os.remove(tmp_zip)
         except OSError:
             pass
+
+# =====================================================
+# Extraer proyectos LIMPIOS del cuerpo de un crew update.
+# El cuerpo trae lineas con formato fijo:  "Project:  CVS #4471 — Dallas, TX"
+# De ahi sacamos el codigo limpio (parte antes del guion), en orden y sin
+# duplicados. Es la fuente confiable, no el titulo libre que inventa el modelo.
+# =====================================================
+_PATRON_PROJECT = re.compile(r"(?im)^\s*Project\s*:\s*(.+?)\s*$")
+
+
+def extraer_proyectos_de_cuerpo(cuerpo: str) -> str:
+    if not cuerpo:
+        return ""
+    proyectos = []
+    for linea in _PATRON_PROJECT.findall(cuerpo):
+        codigo = re.split(r"\s+[—–-]\s+", linea, maxsplit=1)[0].strip()
+        if codigo and codigo not in proyectos:
+            proyectos.append(codigo)
+    return ", ".join(proyectos)
+
 
 # =====================================================
 # HEARTBEAT — señal de vida para el dashboard
