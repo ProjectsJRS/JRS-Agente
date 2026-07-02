@@ -1,12 +1,13 @@
 # dashboard.py
 # Dashboard ejecutivo de JRS Retail Services (Streamlit).
-# v0.1 — solo Status del agente (heartbeat). Las demas secciones se
-# van conectando una por una en pasos siguientes.
+# v0.2 — Status del agente (heartbeat) + Active Projects (historia real).
+# Las demas secciones se conectan una por una en pasos siguientes.
 
+import pandas as pd
 import streamlit as st
 from datetime import datetime
 
-from dashboard_data import get_agent_status
+from dashboard_data import get_agent_status, get_active_projects
 
 st.set_page_config(
     page_title="JRS Operations Dashboard",
@@ -16,10 +17,7 @@ st.set_page_config(
 )
 
 # Auto-refresh cada 60 segundos (recarga la pagina completa).
-st.markdown(
-    '<meta http-equiv="refresh" content="60">',
-    unsafe_allow_html=True,
-)
+st.markdown('<meta http-equiv="refresh" content="60">', unsafe_allow_html=True)
 
 # ----- HEADER -----
 col1, col2, col3 = st.columns([2, 1, 1])
@@ -43,10 +41,29 @@ with col3:
 
 st.divider()
 
-# ----- Secciones pendientes (placeholders visibles) -----
+# ----- ACTIVE PROJECTS (datos reales) -----
 st.subheader("📋 Active Projects")
-st.info("Próximamente — se conecta a la memoria histórica (collection_jrs_history).")
+st.caption("Últimos 7 días · estado por nivel de riesgo del reporte más reciente")
 
+projects = get_active_projects()
+if projects:
+    df = pd.DataFrame(
+        [
+            {
+                "Project": p["project"],
+                "Last update": p["last_update"],
+                "Risk": f'{p["status_dot"]} {p["risk_level"]}',
+            }
+            for p in projects
+        ]
+    )
+    st.dataframe(df, hide_index=True, use_container_width=True)
+else:
+    st.info("No hay proyectos activos en los últimos 7 días.")
+
+st.divider()
+
+# ----- Secciones pendientes (placeholders visibles) -----
 st.subheader("⚠️ Active Alerts (Last 24h)")
 st.info("Próximamente — se conecta al parseo de logs.")
 
