@@ -25,6 +25,7 @@ from tools import (
     obtener_id_etiqueta,
     extraer_cuerpo_correo,
     extraer_texto_de_adjuntos,
+    extraer_imagenes_de_adjuntos,
     classify_email,
     search_drive,
     generate_report,
@@ -57,6 +58,13 @@ CHROMA_DB_PATH = os.getenv("CHROMA_DB_PATH", "./chroma_data")
 # En local  CHROMA_DB_PATH = ./chroma_data     -> heartbeat en ./heartbeat.txt
 HEARTBEAT_FILE = os.path.join(os.path.dirname(CHROMA_DB_PATH) or ".", "heartbeat.txt")
 MODELO = os.getenv("AGENT_MODEL", "claude-opus-4-8")
+
+# ===== BUILD CHECK =====
+# Sube este número CADA vez que despliegas. En los logs de Railway debe
+# aparecer en cada arranque y cada ciclo. Si no ves este valor, Railway está
+# corriendo una imagen CACHEADA (código viejo) — redeploy limpio.
+BUILD_VERSION = "2026-07-02_vision+no-drafts-internos+excel"
+
 SLEEP_BETWEEN_CYCLES_SECONDS = int(os.getenv("SLEEP_BETWEEN_CYCLES_SECONDS", "300"))
 MAX_EMAILS_PER_CYCLE = int(os.getenv("MAX_EMAILS_PER_CYCLE", "10"))
 MAX_ITERATIONS_PER_EMAIL = int(os.getenv("MAX_ITERATIONS_PER_EMAIL", "20"))
@@ -394,7 +402,14 @@ SEND_INTERNAL_REPLY_TOOL_DEF = {
         "thread. You do NOT choose the recipient; it is always the verified internal "
         "sender. If the content is meant for an external party (client/GC/vendor), "
         "still reply to the internal sender with the ready-to-send text — never to "
-        "the external party. Provide subject and the full body of your reply."
+        "the external party. Provide subject and the full body of your reply. "
+        "FILE REQUESTS: when the sender asks for a file / spreadsheet / Excel (e.g. "
+        "'Best Buy File (Excel needed)', a route-assignments list, a tracker), build "
+        "it with the 'attachments' field and it will be attached to this reply. Build "
+        "the table ONLY from data actually present in the sender's email or its "
+        "attachments — organize and clean it, but do NOT invent stores, crews, dates, "
+        "or any values. If the data needed for the file is not provided, do not "
+        "fabricate it: reply asking the sender for it."
     ),
     "input_schema": {
         "type": "object",
@@ -404,6 +419,33 @@ SEND_INTERNAL_REPLY_TOOL_DEF = {
             "body": {
                 "type": "string",
                 "description": "The full body of the reply to the internal sender",
+            },
+            "attachments": {
+                "type": "array",
+                "description": (
+                    "Optional. Files to generate and attach to this reply. Only "
+                    "provide when the sender requested a file. Each item builds one "
+                    "spreadsheet from data the sender provided."
+                ),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "kind": {"type": "string", "enum": ["xlsx"]},
+                        "filename": {"type": "string", "description": "e.g. Best_Buy_Route_Assignments.xlsx"},
+                        "title": {"type": "string", "description": "Title shown at the top of the sheet"},
+                        "sheet_name": {"type": "string"},
+                        "headers": {
+                            "type": "array", "items": {"type": "string"},
+                            "description": "Column headers, in order",
+                        },
+                        "rows": {
+                            "type": "array",
+                            "items": {"type": "array", "items": {"type": "string"}},
+                            "description": "Data rows; each row is a list of cell values matching headers",
+                        },
+                    },
+                    "required": ["kind", "filename", "headers", "rows"],
+                },
             },
         },
         "required": ["original_email_id", "subject", "body"],
@@ -490,13 +532,28 @@ def ejecutar_herramienta(nombre: str, parametros: dict, cc_autorizados: list = N
             )
 
         elif nombre == "create_gmail_draft":
-            resultado = create_gmail_draft(
-                original_email_id=parametros.get("original_email_id", ""),
-                to=parametros.get("to", ""),
-                subject=parametros.get("subject", ""),
-                body=parametros.get("body", ""),
-                is_external=parametros.get("is_external", True),
-            )
+            # SEGUNDO CANDADO (defensa en profundidad): jamás un borrador para
+            # un remitente interno. internal_recipient viene no-vacío SOLO cuando
+            # el remitente es interno (lo inyecta agent.py). Aunque una edición
+            # futura reintrodujera la tool en la caja interna, aquí se bloquea.
+            if internal_recipient:
+                logger.warning(
+                    "[create_gmail_draft] BLOQUEADO: remitente interno; "
+                    "los internos reciben respuesta directa (send_internal_reply), "
+                    "nunca un borrador.")
+                resultado = {
+                    "error": ("create_gmail_draft está bloqueado para remitentes "
+                              "internos. Usa send_internal_reply para responderles "
+                              "directamente.")
+                }
+            else:
+                resultado = create_gmail_draft(
+                    original_email_id=parametros.get("original_email_id", ""),
+                    to=parametros.get("to", ""),
+                    subject=parametros.get("subject", ""),
+                    body=parametros.get("body", ""),
+                    is_external=parametros.get("is_external", True),
+                )
 
         elif nombre == "send_quote_to_richard":
             resultado = send_quote_to_richard(
@@ -518,6 +575,7 @@ def ejecutar_herramienta(nombre: str, parametros: dict, cc_autorizados: list = N
                 body=parametros.get("body", ""),
                 recipient=internal_recipient,
                 cc_emails=cc_autorizados or [],
+                attachments=parametros.get("attachments") or [],
             )
 
         elif nombre == "alert_if_critical":
@@ -601,6 +659,10 @@ def leer_correos_pendientes(max_results: int = 10) -> list:
             if texto_adjuntos:
                 cuerpo = cuerpo + "\n\n--- ARCHIVOS ADJUNTOS AL CORREO ---" + texto_adjuntos
 
+            # Imágenes adjuntas (JPEG/JPG/PNG/GIF/WEBP): se pasan a Claude como
+            # imagen NATIVA (visión), no como OCR. Data para el bloque de imagen.
+            imagenes = extraer_imagenes_de_adjuntos(service, mensaje['id'], msg['payload'])
+
             correos.append({
                 'id': mensaje['id'],
                 'from': remitente,
@@ -608,6 +670,7 @@ def leer_correos_pendientes(max_results: int = 10) -> list:
                 'body': cuerpo,
                 'date': fecha,
                 'cc': cc,
+                'images': imagenes,
             })
 
         return correos
@@ -688,7 +751,14 @@ def procesar_un_correo(correo: dict) -> dict:
         instruccion_rol = ""
 
         if es_interno:
-            tools_para_este_correo = tools_para_este_correo + [SEND_INTERNAL_REPLY_TOOL_DEF]
+            # CANDADO DETERMINISTA: para remitentes internos QUITAMOS
+            # create_gmail_draft por completo. El modelo NO puede dejar un
+            # borrador a un interno; su única vía de respuesta es
+            # send_internal_reply. La regla "nunca borradores para internos"
+            # deja de ser una instrucción blanda y pasa a ser garantía de código.
+            tools_para_este_correo = [
+                t for t in tools_para_este_correo if t["name"] != "create_gmail_draft"
+            ] + [SEND_INTERNAL_REPLY_TOOL_DEF]
             instruccion_rol = (
                 "This email is from an INTERNAL JRS decision-maker (Richard, Ralph, "
                 "Macayla, or Emmanuel). Do NOT leave a draft and do NOT wait for "
@@ -728,8 +798,27 @@ def procesar_un_correo(correo: dict) -> dict:
     if cc_autorizados:
         logger.info(f"  CC autorizados (whitelist): {cc_autorizados}")
 
-    # Agent Loop con Anthropic API
-    messages = [{"role": "user", "content": instruccion}]
+    # Agent Loop con Anthropic API.
+    # El primer mensaje del usuario lleva el texto (instrucción + correo) y,
+    # si el correo trae imágenes adjuntas, los bloques de imagen NATIVOS para
+    # que Claude las VEA (visión multimodal), no solo su OCR.
+    contenido_usuario = [{"type": "text", "text": instruccion}]
+    for img in correo.get("images", []):
+        try:
+            contenido_usuario.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": img["media_type"],
+                    "data": img["data"],
+                },
+            })
+        except Exception as e:
+            logger.warning(f"  imagen adjunta omitida: {e}")
+    if len(contenido_usuario) > 1:
+        logger.info(f"  Imágenes adjuntas al modelo: {len(contenido_usuario) - 1}")
+
+    messages = [{"role": "user", "content": contenido_usuario}]
     iteraciones = 0
     draft_id = None
     report_text = None
@@ -962,7 +1051,7 @@ def asegurar_chromadb():
 def escribir_heartbeat():
     try:
         with open(HEARTBEAT_FILE, "w", encoding="utf-8") as f:
-            f.write(datetime.now().isoformat())
+            f.write(datetime.now().isoformat() + " | BUILD " + BUILD_VERSION)
     except Exception as e:
         logger.warning(f"No se pudo escribir heartbeat: {e}")
 
@@ -970,6 +1059,9 @@ def escribir_heartbeat():
 # FUNCION PRINCIPAL
 # =====================================================
 async def main():
+    logger.info("=" * 60)
+    logger.info(f"BUILD CHECK -> {BUILD_VERSION}")
+    logger.info("=" * 60)
     logger.info("JRS Central Operations Intelligence System - INICIADO en produccion")
     logger.info(f"   Timezone:       {TIMEZONE}")
     logger.info(f"   ChromaDB path:  {CHROMA_DB_PATH}")

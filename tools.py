@@ -222,6 +222,112 @@ def _ocr_imagen(raw_bytes, filename=""):
         return f"[Error de OCR en la imagen '{filename}': {e}]"
 
 
+def _reducir_imagen(raw_bytes, max_bytes):
+    """Reduce una imagen grande para que quepa en el límite de la API
+    (Anthropic ~5MB por imagen). Devuelve (bytes, 'image/jpeg') o
+    (None, None) si no se pudo. Requiere Pillow."""
+    try:
+        import io
+        from PIL import Image
+        img = Image.open(io.BytesIO(raw_bytes)).convert("RGB")
+        for escala in (1.0, 0.75, 0.5, 0.35, 0.25):
+            buf = io.BytesIO()
+            if escala == 1.0:
+                im2 = img
+            else:
+                w, h = img.size
+                im2 = img.resize((max(1, int(w * escala)), max(1, int(h * escala))))
+            im2.save(buf, format="JPEG", quality=80, optimize=True)
+            b = buf.getvalue()
+            if len(b) <= max_bytes:
+                return b, "image/jpeg"
+        return None, None
+    except Exception:
+        return None, None
+
+
+def _preparar_imagen(raw, max_bytes, fallback_media):
+    """Devuelve (bytes, media_type) listos para Anthropic — formato en
+    {jpeg,png,gif,webp} y <= max_bytes — o (None, None) si no se puede.
+    Detecta el formato REAL de los bytes (no confía en la extensión), y
+    convierte/reduce a JPEG cuando el formato no está soportado o pesa de más."""
+    SUP = {"JPEG": "image/jpeg", "PNG": "image/png",
+           "GIF": "image/gif", "WEBP": "image/webp"}
+    try:
+        import io
+        from PIL import Image
+        fmt = (Image.open(io.BytesIO(raw)).format or "").upper()
+        if fmt in SUP and len(raw) <= max_bytes:
+            return raw, SUP[fmt]
+        # Formato no soportado (BMP/TIFF...) o muy grande -> a JPEG.
+        b, mt = _reducir_imagen(raw, max_bytes)
+        return (b, mt) if b else (None, None)
+    except Exception:
+        # Sin Pillow: confiar en la extensión/mime y solo validar tamaño.
+        return (raw, fallback_media) if len(raw) <= max_bytes else (None, None)
+
+
+def extraer_imagenes_de_adjuntos(service, id_correo, payload,
+                                 max_imgs=6, max_bytes=3_500_000):
+    """Extrae las imágenes adjuntas (JPEG/JPG/PNG/GIF/WEBP) como bloques
+    base64 para que Claude las VEA nativamente (visión multimodal), en vez
+    de solo OCR-earlas a texto. Devuelve una lista de dicts:
+        {"filename", "media_type", "data"(base64 estándar)}
+    Degrada con gracia: imágenes enormes o en formato no soportado se
+    convierten a JPEG con Pillow; si no se puede, se omiten con log. Se
+    limita la cantidad para proteger el tamaño del request."""
+    import base64 as _b64
+    imagenes = []
+    for adj in listar_adjuntos(payload):
+        if len(imagenes) >= max_imgs:
+            break
+        filename = adj.get("filename", "")
+        nombre = filename.lower()
+        mime = (adj.get("mimeType") or "").lower()
+        es_img = nombre.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp",
+                                  ".bmp", ".tif", ".tiff")) \
+            or mime.startswith("image/")
+        if not es_img:
+            continue
+
+        # media_type tentativo por extensión/mime (fallback si no hay Pillow).
+        if nombre.endswith(".png") or mime == "image/png":
+            fallback_media = "image/png"
+        elif nombre.endswith(".gif") or mime == "image/gif":
+            fallback_media = "image/gif"
+        elif nombre.endswith(".webp") or mime == "image/webp":
+            fallback_media = "image/webp"
+        else:
+            fallback_media = "image/jpeg"
+
+        try:
+            data_b64 = adj.get("data")
+            if not data_b64 and adj.get("attachmentId"):
+                att = service.users().messages().attachments().get(
+                    userId="me", messageId=id_correo, id=adj["attachmentId"]
+                ).execute()
+                data_b64 = att.get("data")
+            if not data_b64:
+                continue
+            raw = base64.urlsafe_b64decode(data_b64)
+        except Exception as e:
+            logger.warning(f"[imagenes] no se pudo bajar '{filename}': {e}")
+            continue
+
+        # Detectar formato real, convertir/reducir si hace falta.
+        raw, media_type = _preparar_imagen(raw, max_bytes, fallback_media)
+        if raw is None:
+            logger.warning(f"[imagenes] '{filename}' no se pudo preparar, se omite")
+            continue
+
+        imagenes.append({
+            "filename": filename,
+            "media_type": media_type,
+            "data": _b64.standard_b64encode(raw).decode("ascii"),
+        })
+    return imagenes
+
+
 def extraer_texto_de_adjuntos(service, id_correo, payload, max_chars=20000):
     """
     Descarga cada adjunto del correo y extrae su texto.
@@ -298,10 +404,17 @@ def extraer_texto_de_adjuntos(service, id_correo, payload, max_chars=20000):
             elif nombre.endswith(('.txt', '.csv')):
                 texto = raw.decode('utf-8', errors='ignore').strip()
 
-            # --- Imagenes (PNG/JPG/...) via OCR ---
-            elif nombre.endswith(('.png', '.jpg', '.jpeg', '.tif', '.tiff',
-                                  '.bmp', '.gif')) or mime.startswith('image/'):
-                texto = _ocr_imagen(raw, filename)
+            # --- Imagenes (PNG/JPG/...) ---
+            # Ya NO se OCR-ean a texto: se pasan a Claude como imagen nativa
+            # (visión multimodal) desde extraer_imagenes_de_adjuntos. Aquí solo
+            # dejamos una nota para que el modelo sepa que hay una imagen.
+            elif nombre.endswith(('.png', '.jpg', '.jpeg', '.gif', '.webp',
+                                  '.tif', '.tiff', '.bmp')) or mime.startswith('image/'):
+                bloques.append(
+                    f"\n[Imagen adjunta '{filename}' — se te entrega como imagen "
+                    f"visual más abajo; analízala directamente.]"
+                )
+                continue
 
             else:
                 bloques.append(
@@ -812,8 +925,10 @@ def send_internal_reply(
     body: str,
     recipient: str,
     cc_emails: list = None,
+    attachments: list = None,
 ) -> dict:
     cc_emails = cc_emails or []
+    attachments = attachments or []
 
     # CANDADO: re-verificar que el destinatario sea INTERNO. Reutilizamos la
     # misma lógica de whitelist que usa agent.py. Defensa en profundidad:
@@ -836,6 +951,7 @@ def send_internal_reply(
     if subject and not subject.lower().startswith("re:"):
         subject = "Re: " + subject
 
+    generados = []  # rutas temporales de adjuntos generados, a limpiar al final
     try:
         service = obtener_servicio_gmail()
 
@@ -858,8 +974,48 @@ def send_internal_reply(
         except Exception as e:
             logger.warning(f"[send_internal_reply] sin metadata de hilo: {e}")
 
-        # Construir el correo.
-        mensaje = MIMEText(body or "", 'plain', 'utf-8')
+        # Generar adjuntos solicitados (Opción A: formatear datos provistos por
+        # el remitente; el builder NO inventa datos). Solo xlsx por ahora.
+        partes_adjuntas = []
+        nombres_adjuntos = []
+        if attachments:
+            try:
+                from data_files import generar_xlsx_tabla
+            except Exception as e:
+                logger.warning(f"[send_internal_reply] data_files no disponible: {e}")
+                attachments = []
+            for spec in attachments:
+                try:
+                    kind = str((spec or {}).get("kind", "xlsx")).lower()
+                    if kind != "xlsx":
+                        logger.warning(f"[send_internal_reply] tipo de adjunto no soportado: {kind}")
+                        continue
+                    fname = str(spec.get("filename") or "JRS_File.xlsx").strip()
+                    if not fname.lower().endswith(".xlsx"):
+                        fname += ".xlsx"
+                    ruta = os.path.join(tempfile.gettempdir(), fname)
+                    generar_xlsx_tabla(spec, ruta)
+                    generados.append(ruta)
+                    with open(ruta, "rb") as fh:
+                        data = fh.read()
+                    adj = MIMEApplication(
+                        data,
+                        _subtype="vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                    adj.add_header('Content-Disposition', 'attachment', filename=fname)
+                    partes_adjuntas.append(adj)
+                    nombres_adjuntos.append(fname)
+                except Exception as e:
+                    logger.error(f"[send_internal_reply] adjunto falló: {e}")
+
+        # Construir el correo. Con adjuntos -> multipart; sin adjuntos ->
+        # texto simple (comportamiento idéntico al anterior).
+        if partes_adjuntas:
+            mensaje = MIMEMultipart()
+            mensaje.attach(MIMEText(body or "", 'plain', 'utf-8'))
+            for adj in partes_adjuntas:
+                mensaje.attach(adj)
+        else:
+            mensaje = MIMEText(body or "", 'plain', 'utf-8')
         mensaje['to'] = destinatario
         if cc_emails:
             mensaje['cc'] = ", ".join(cc_emails)
@@ -894,7 +1050,8 @@ def send_internal_reply(
 
         logger.info(
             f"[send_internal_reply] respuesta enviada a {destinatario} "
-            f"(cc: {cc_emails or 'ninguno'}, msg {message_id}, hilo {thread_id})"
+            f"(cc: {cc_emails or 'ninguno'}, msg {message_id}, hilo {thread_id}, "
+            f"adjuntos {nombres_adjuntos or 'ninguno'})"
         )
         return {
             "sent": True,
@@ -902,12 +1059,20 @@ def send_internal_reply(
             "recipient": destinatario,
             "cc": cc_emails,
             "thread_id": thread_id,
+            "attachments": nombres_adjuntos,
             "label_changed": label_changed,
         }
 
     except Exception as e:
         logger.error(f"[send_internal_reply] error: {e}")
         return {"sent": False, "error": str(e)}
+    finally:
+        for ruta in generados:
+            try:
+                if ruta and os.path.exists(ruta):
+                    os.remove(ruta)
+            except OSError:
+                pass
 
 
 # =====================================================
