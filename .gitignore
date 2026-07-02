@@ -34,3 +34,7 @@ chroma_data/
 codigos_pdf/
 
 chroma_data_backup_*.zip
+
+config.yaml
+heartbeat.txt
+alerts.jsonl

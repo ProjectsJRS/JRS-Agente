@@ -1,1 +1,1 @@
-2026-07-02T12:00:32.586683 | BUILD 2026-07-02_maxtokens32k+multitab+vision
+2026-07-02T15:06:13.683095 | BUILD 2026-07-02_s3.5-recognition+s1.6-identity

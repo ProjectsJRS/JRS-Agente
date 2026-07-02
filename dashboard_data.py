@@ -12,6 +12,7 @@
 #   - get_clients_at_risk   -> stub (analisis predictivo, Paso 7.4) [FUTURO]
 
 import os
+import json
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Dict
@@ -145,9 +146,45 @@ def get_active_projects() -> List[Dict]:
 # =====================================================
 # STUBS — se conectaran a datos reales en pasos siguientes.
 # =====================================================
-def get_recent_alerts() -> List[Dict]:
-    """Alertas CRITICAL/HIGH de las ultimas 24h. PENDIENTE: parse de logs."""
-    return []
+ALERTS_FILE = os.path.join(_VOLUME_DIR, "alerts.jsonl")
+
+
+def get_recent_alerts(hours: int = 24) -> List[Dict]:
+    """
+    Lee alerts.jsonl y devuelve las alertas de las ultimas `hours` horas.
+
+    Cada item: {timestamp, severity, project, summary}.
+    Robusto: si el archivo no existe o una linea esta corrupta, la salta
+    sin romper el dashboard. Devuelve las mas recientes primero.
+    """
+    try:
+        with open(ALERTS_FILE, "r", encoding="utf-8") as f:
+            lineas = f.readlines()
+    except Exception:
+        return []
+
+    cutoff = datetime.now() - timedelta(hours=hours)
+    alertas = []
+    for linea in lineas:
+        linea = linea.strip()
+        if not linea:
+            continue
+        try:
+            reg = json.loads(linea)
+            ts = datetime.strptime(reg["timestamp"], "%Y-%m-%d %H:%M:%S")
+        except Exception:
+            continue
+        if ts < cutoff:
+            continue
+        alertas.append({
+            "timestamp": reg.get("timestamp", ""),
+            "severity": (reg.get("severity", "") or "").upper(),
+            "project": reg.get("project", ""),
+            "summary": reg.get("summary", ""),
+        })
+
+    alertas.sort(key=lambda a: a["timestamp"], reverse=True)
+    return alertas
 
 
 def get_operational_metrics() -> Dict:

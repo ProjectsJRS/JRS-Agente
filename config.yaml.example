@@ -1,0 +1,41 @@
+# config.yaml.example — PLANTILLA (esta SI sube al repo)
+# El config.yaml real (con hashes bcrypt reales) NO sube a git: va al .gitignore.
+# Genera el real con:  python generar_config.py
+#
+# Estructura esperada por Streamlit-Authenticator 0.4.2:
+
+cookie:
+  name: jrs_dashboard_auth
+  key: REEMPLAZAR_CON_CLAVE_ALEATORIA   # generar_config.py la genera automaticamente
+  expiry_days: 7
+
+credentials:
+  usernames:
+    richard:
+      email: richard@jrsretailservices.com
+      first_name: Richard
+      last_name: Bodington
+      password: $2b$12$EJEMPLO_HASH_BCRYPT_FICTICIO_NO_REAL_xxxxxxxxxxxxxxxxx
+      failed_login_attempts: 0
+      logged_in: false
+    ralph:
+      email: ralph@jrsretailservices.com
+      first_name: Ralph
+      last_name: Kirk
+      password: $2b$12$EJEMPLO_HASH_BCRYPT_FICTICIO_NO_REAL_xxxxxxxxxxxxxxxxx
+      failed_login_attempts: 0
+      logged_in: false
+    macayla:
+      email: macayla@jrsretailservices.com
+      first_name: Macayla
+      last_name: ""
+      password: $2b$12$EJEMPLO_HASH_BCRYPT_FICTICIO_NO_REAL_xxxxxxxxxxxxxxxxx
+      failed_login_attempts: 0
+      logged_in: false
+    emmanuel:
+      email: emmanuel@jrsretailservices.com
+      first_name: Emmanuel
+      last_name: Mendoza
+      password: $2b$12$EJEMPLO_HASH_BCRYPT_FICTICIO_NO_REAL_xxxxxxxxxxxxxxxxx
+      failed_login_attempts: 0
+      logged_in: false
