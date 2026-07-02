@@ -63,11 +63,17 @@ MODELO = os.getenv("AGENT_MODEL", "claude-opus-4-8")
 # Sube este número CADA vez que despliegas. En los logs de Railway debe
 # aparecer en cada arranque y cada ciclo. Si no ves este valor, Railway está
 # corriendo una imagen CACHEADA (código viejo) — redeploy limpio.
-BUILD_VERSION = "2026-07-02_multitab-xlsx+vision+no-drafts"
+BUILD_VERSION = "2026-07-02_maxtokens32k+multitab+vision"
 
 SLEEP_BETWEEN_CYCLES_SECONDS = int(os.getenv("SLEEP_BETWEEN_CYCLES_SECONDS", "300"))
 MAX_EMAILS_PER_CYCLE = int(os.getenv("MAX_EMAILS_PER_CYCLE", "10"))
 MAX_ITERATIONS_PER_EMAIL = int(os.getenv("MAX_ITERATIONS_PER_EMAIL", "20"))
+# Techo de tokens de SALIDA por llamada al modelo. 8192 se quedaba corto
+# armando workbooks grandes (el JSON del tool_use con todas las filas/tabs
+# es enorme) -> el modelo se cortaba con stop_reason 'max_tokens'. Opus 4
+# soporta hasta 32000. Configurable por env por si hay que ajustarlo sin
+# tocar código.
+MAX_TOKENS = int(os.getenv("AGENT_MAX_TOKENS", "32000"))
 MAX_CONSECUTIVE_FAILURES = int(os.getenv("MAX_CONSECUTIVE_FAILURES", "5"))
 
 # Bootstrap del ChromaDB (descarga inicial desde GitHub Releases en Railway).
@@ -850,7 +856,7 @@ def procesar_un_correo(correo: dict) -> dict:
 
             respuesta = cliente.messages.create(
                 model=MODELO,
-                max_tokens=8192,
+                max_tokens=MAX_TOKENS,
                 system=SYSTEM_PROMPT,
                 tools=tools_para_este_correo,
                 messages=messages,
@@ -919,7 +925,14 @@ def procesar_un_correo(correo: dict) -> dict:
 
             else:
                 # stop_reason inesperado
-                logger.warning(f"Stop reason inesperado: {respuesta.stop_reason}")
+                if respuesta.stop_reason == "max_tokens":
+                    logger.warning(
+                        f"Respuesta cortada por límite de tokens (MAX_TOKENS={MAX_TOKENS}). "
+                        f"La acción quedó incompleta. Si recurre con correos complejos, "
+                        f"sube AGENT_MAX_TOKENS en el entorno."
+                    )
+                else:
+                    logger.warning(f"Stop reason inesperado: {respuesta.stop_reason}")
                 break
 
     except Exception as e:
