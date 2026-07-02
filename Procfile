@@ -1,1 +1,1 @@
-worker: python agent.py
+web: bash start.sh
