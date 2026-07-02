@@ -978,6 +978,7 @@ def send_internal_reply(
         # el remitente; el builder NO inventa datos). Solo xlsx por ahora.
         partes_adjuntas = []
         nombres_adjuntos = []
+        nombres_usados = set()
         if attachments:
             try:
                 from data_files import generar_xlsx_tabla
@@ -993,6 +994,14 @@ def send_internal_reply(
                     fname = str(spec.get("filename") or "JRS_File.xlsx").strip()
                     if not fname.lower().endswith(".xlsx"):
                         fname += ".xlsx"
+                    # Dedupe: nunca dos adjuntos con el mismo nombre.
+                    if fname.lower() in nombres_usados:
+                        base = fname[:-5]
+                        n = 2
+                        while f"{base}_{n}.xlsx".lower() in nombres_usados:
+                            n += 1
+                        fname = f"{base}_{n}.xlsx"
+                    nombres_usados.add(fname.lower())
                     ruta = os.path.join(tempfile.gettempdir(), fname)
                     generar_xlsx_tabla(spec, ruta)
                     generados.append(ruta)

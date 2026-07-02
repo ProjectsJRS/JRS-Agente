@@ -2,20 +2,22 @@
 # -------------------------------------------------------------------
 # Builder genérico de archivos de datos para solicitudes internas
 # ("X File (Excel needed)"). NO es específico de "Best Buy": arma un
-# Excel limpio y profesional a partir de una tabla que el agente
-# estructura (título, encabezados, filas) con los datos que Richard
-# provee en el correo o sus adjuntos (Opción A). El builder NO inventa
-# datos: solo formatea lo que recibe.
+# Excel limpio a partir de tablas que el agente estructura con los datos
+# que el remitente provee (Opción A). El builder NO inventa datos.
 #
 # API:
 #   generar_xlsx_tabla(spec, output_path) -> str
 #
-# spec = {
-#   "title":      "Best Buy — Route Assignments",   # opcional (título en la hoja)
-#   "sheet_name": "Routes",                          # opcional
-#   "headers":    ["Store #", "Address", "Crew", "Date", "Status"],
-#   "rows":       [ ["1234", "...", "Crew A", "2026-07-05", "Assigned"], ... ],
-# }
+# spec admite DOS formas:
+#  (1) Una sola hoja:
+#      {"title","sheet_name","headers":[...],"rows":[[...],...]}
+#  (2) Varias hojas (workbook de varias pestañas) — para pedidos tipo
+#      "8-tab workbook":
+#      {"filename": "...",
+#       "sheets": [
+#          {"sheet_name":"Cover","title":"...","headers":[...],"rows":[...]},
+#          {"sheet_name":"Route Summary","headers":[...],"rows":[...]},
+#          ... ]}
 # -------------------------------------------------------------------
 
 NAVY_HEX = "1F3A5F"
@@ -23,27 +25,32 @@ LIGHT_HEX = "EEF2F7"
 DARK_HEX = "222222"
 
 
-def generar_xlsx_tabla(spec: dict, output_path: str) -> str:
-    from openpyxl import Workbook
+def _nombre_hoja(propuesto, usados, idx):
+    base = (str(propuesto or "").strip() or f"Sheet{idx}")[:31]
+    nombre = base
+    n = 2
+    while nombre.lower() in usados:
+        suf = f"_{n}"
+        nombre = (base[:31 - len(suf)] + suf)
+        n += 1
+    usados.add(nombre.lower())
+    return nombre
+
+
+def _escribir_hoja(ws, hoja):
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     from openpyxl.utils import get_column_letter
     from openpyxl.worksheet.properties import PageSetupProperties
 
-    spec = spec or {}
-    headers = [str(h) for h in (spec.get("headers") or [])]
-    rows = spec.get("rows") or []
-    title = str(spec.get("title") or "").strip()
-    sheet_name = (str(spec.get("sheet_name") or "Sheet1").strip() or "Sheet1")[:31]
+    hoja = hoja or {}
+    headers = [str(h) for h in (hoja.get("headers") or [])]
+    rows = hoja.get("rows") or []
+    title = str(hoja.get("title") or "").strip()
 
-    # Si no hay encabezados pero sí filas, derivar encabezados genéricos.
     if not headers and rows:
         ncols = max((len(r) for r in rows if isinstance(r, (list, tuple))), default=1)
         headers = [f"Column {i+1}" for i in range(ncols)]
     ncols = max(len(headers), 1)
-
-    wb = Workbook()
-    ws = wb.active
-    ws.title = sheet_name
 
     navy_fill = PatternFill("solid", fgColor=NAVY_HEX)
     light_fill = PatternFill("solid", fgColor=LIGHT_HEX)
@@ -54,14 +61,12 @@ def generar_xlsx_tabla(spec: dict, output_path: str) -> str:
     left = Alignment(horizontal="left", vertical="top", wrap_text=True)
 
     r = 1
-    # Título opcional (fila combinada arriba de la tabla).
     if title:
         ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=ncols)
         c = ws.cell(row=r, column=1, value=title)
         c.font = Font(bold=True, color=NAVY_HEX, size=13)
         r += 2
 
-    # Encabezados.
     for j, h in enumerate(headers, start=1):
         cell = ws.cell(row=r, column=j, value=h)
         cell.fill = navy_fill
@@ -71,7 +76,6 @@ def generar_xlsx_tabla(spec: dict, output_path: str) -> str:
     header_row = r
     r += 1
 
-    # Filas de datos. Normaliza cada fila a la longitud de headers.
     for idx, fila in enumerate(rows, start=1):
         if not isinstance(fila, (list, tuple)):
             fila = [fila]
@@ -85,7 +89,6 @@ def generar_xlsx_tabla(spec: dict, output_path: str) -> str:
                 cell.fill = light_fill
         r += 1
 
-    # Ancho de columnas aproximado por contenido (con topes).
     for j in range(1, ncols + 1):
         largo = len(str(headers[j - 1])) if j - 1 < len(headers) else 8
         for fila in rows:
@@ -96,13 +99,37 @@ def generar_xlsx_tabla(spec: dict, output_path: str) -> str:
     ws.sheet_view.showGridLines = False
     if rows:
         ws.freeze_panes = f"A{header_row + 1}"
-    ws.auto_filter.ref = (
-        f"A{header_row}:{get_column_letter(ncols)}{header_row + len(rows)}"
-    )
+        ws.auto_filter.ref = (
+            f"A{header_row}:{get_column_letter(ncols)}{header_row + len(rows)}"
+        )
     ws.page_setup.orientation = "landscape"
     ws.page_setup.fitToWidth = 1
     ws.page_setup.fitToHeight = 0
     ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
+
+
+def generar_xlsx_tabla(spec, output_path):
+    from openpyxl import Workbook
+
+    spec = spec or {}
+    wb = Workbook()
+    hojas = spec.get("sheets")
+
+    if hojas and isinstance(hojas, list):
+        usados = set()
+        primera = True
+        for idx, h in enumerate(hojas, start=1):
+            ws = wb.active if primera else wb.create_sheet()
+            ws.title = _nombre_hoja((h or {}).get("sheet_name") or (h or {}).get("title"),
+                                    usados, idx)
+            _escribir_hoja(ws, h)
+            primera = False
+        if primera:  # sheets venía vacío -> hoja única desde el spec
+            wb.active.title = _nombre_hoja(spec.get("sheet_name"), set(), 1)
+            _escribir_hoja(wb.active, spec)
+    else:
+        wb.active.title = _nombre_hoja(spec.get("sheet_name"), set(), 1)
+        _escribir_hoja(wb.active, spec)
 
     wb.save(output_path)
     return output_path
@@ -110,13 +137,18 @@ def generar_xlsx_tabla(spec: dict, output_path: str) -> str:
 
 if __name__ == "__main__":
     demo = {
-        "title": "Best Buy — Route Assignments",
-        "sheet_name": "Routes",
-        "headers": ["Store #", "Address", "City/State", "Crew", "Date", "Status"],
-        "rows": [
-            ["0421", "500 Retail Row", "Dallas, TX", "Crew A", "2026-07-06", "Assigned"],
-            ["0533", "88 Mall Blvd", "Plano, TX", "Crew B", "2026-07-06", "Assigned"],
-            ["0619", "12 Center Dr", "Frisco, TX", "Crew A", "2026-07-07", "Pending access"],
+        "filename": "Target_Travel_Budget.xlsx",
+        "sheets": [
+            {"sheet_name": "Cover", "title": "Target Routes — Travel Budget",
+             "headers": ["Field", "Value"],
+             "rows": [["Prepared for", "Richard"], ["Scope", "Pricing only, no bookings"]]},
+            {"sheet_name": "Route Summary",
+             "headers": ["Crew", "State", "Size", "Stores", "Start", "End"],
+             "rows": [["40", "CA", "5", "6", "2026-07-13", "2026-07-19"],
+                      ["29", "TX", "6", "6", "2026-07-13", "2026-07-19"]]},
+            {"sheet_name": "Texas Airbnb",
+             "headers": ["Crew", "City", "Nightly", "Nights", "Total", "Link"],
+             "rows": [["29", "Longview TX", "$140", "6", "$840", "verify"]]},
         ],
     }
-    print("XLSX:", generar_xlsx_tabla(demo, "BestBuy_Routes_sample.xlsx"))
+    print("XLSX:", generar_xlsx_tabla(demo, "Target_multi_sample.xlsx"))

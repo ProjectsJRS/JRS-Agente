@@ -63,7 +63,7 @@ MODELO = os.getenv("AGENT_MODEL", "claude-opus-4-8")
 # Sube este número CADA vez que despliegas. En los logs de Railway debe
 # aparecer en cada arranque y cada ciclo. Si no ves este valor, Railway está
 # corriendo una imagen CACHEADA (código viejo) — redeploy limpio.
-BUILD_VERSION = "2026-07-02_vision+no-drafts-internos+excel"
+BUILD_VERSION = "2026-07-02_multitab-xlsx+vision+no-drafts"
 
 SLEEP_BETWEEN_CYCLES_SECONDS = int(os.getenv("SLEEP_BETWEEN_CYCLES_SECONDS", "300"))
 MAX_EMAILS_PER_CYCLE = int(os.getenv("MAX_EMAILS_PER_CYCLE", "10"))
@@ -424,27 +424,46 @@ SEND_INTERNAL_REPLY_TOOL_DEF = {
                 "type": "array",
                 "description": (
                     "Optional. Files to generate and attach to this reply. Only "
-                    "provide when the sender requested a file. Each item builds one "
-                    "spreadsheet from data the sender provided."
+                    "provide when the sender requested a file. IMPORTANT: for a "
+                    "multi-tab workbook (e.g. an '8-tab' file), use ONE attachment "
+                    "with a 'sheets' array — one entry per tab. Do NOT create "
+                    "several attachments with the same filename."
                 ),
                 "items": {
                     "type": "object",
                     "properties": {
                         "kind": {"type": "string", "enum": ["xlsx"]},
                         "filename": {"type": "string", "description": "e.g. Best_Buy_Route_Assignments.xlsx"},
-                        "title": {"type": "string", "description": "Title shown at the top of the sheet"},
-                        "sheet_name": {"type": "string"},
+                        "sheets": {
+                            "type": "array",
+                            "description": "One entry per worksheet/tab. Use for multi-tab workbooks.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "sheet_name": {"type": "string", "description": "Tab name (<=31 chars)"},
+                                    "title": {"type": "string", "description": "Title shown at the top of the tab"},
+                                    "headers": {"type": "array", "items": {"type": "string"}},
+                                    "rows": {
+                                        "type": "array",
+                                        "items": {"type": "array", "items": {"type": "string"}},
+                                    },
+                                },
+                                "required": ["headers", "rows"],
+                            },
+                        },
+                        "title": {"type": "string", "description": "Single-sheet only: title at the top"},
+                        "sheet_name": {"type": "string", "description": "Single-sheet only: tab name"},
                         "headers": {
                             "type": "array", "items": {"type": "string"},
-                            "description": "Column headers, in order",
+                            "description": "Single-sheet only: column headers, in order",
                         },
                         "rows": {
                             "type": "array",
                             "items": {"type": "array", "items": {"type": "string"}},
-                            "description": "Data rows; each row is a list of cell values matching headers",
+                            "description": "Single-sheet only: data rows matching headers",
                         },
                     },
-                    "required": ["kind", "filename", "headers", "rows"],
+                    "required": ["kind", "filename"],
                 },
             },
         },
