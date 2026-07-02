@@ -908,13 +908,18 @@ def procesar_un_correo(correo: dict) -> dict:
             iteraciones += 1
             logger.info(f"  Iteracion {iteraciones}...")
 
-            respuesta = cliente.messages.create(
+            # Streaming obligatorio: con MAX_TOKENS alto (32000) la API exige
+            # stream porque la respuesta podria superar 10 min. get_final_message()
+            # devuelve el mismo objeto Message (.content, .stop_reason) que create(),
+            # asi que el resto del loop no cambia.
+            with cliente.messages.stream(
                 model=MODELO,
                 max_tokens=MAX_TOKENS,
                 system=SYSTEM_PROMPT,
                 tools=tools_para_este_correo,
                 messages=messages,
-            )
+            ) as stream:
+                respuesta = stream.get_final_message()
 
             # Agregar respuesta del asistente al historial
             messages.append({"role": "assistant", "content": respuesta.content})

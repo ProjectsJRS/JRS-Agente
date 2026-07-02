@@ -1157,6 +1157,39 @@ def web_search(query: str, max_results: int = 5) -> dict:
 # =====================================================
 # HERRAMIENTA 6: alert_if_critical
 # =====================================================
+# =====================================================
+# Registro estructurado de alertas para el dashboard.
+# Cada alerta CRITICAL se anexa como una linea JSON a alerts.jsonl, en el
+# mismo volumen que ChromaDB/heartbeat. Lo lee el dashboard (get_recent_alerts).
+# Falla en silencio: no persistir una alerta jamas debe romper el envio a Richard.
+# =====================================================
+_ALERTS_FILE = os.path.join(
+    os.path.dirname(os.getenv("CHROMA_DB_PATH", "./chroma_data")) or ".",
+    "alerts.jsonl",
+)
+
+
+def registrar_alerta(
+    severity: str,
+    project: str,
+    summary: str,
+    timestamp: str,
+    recipients: list,
+) -> None:
+    try:
+        registro = {
+            "timestamp": timestamp,
+            "severity": (severity or "").upper(),
+            "project": project,
+            "summary": summary,
+            "recipients": recipients,
+        }
+        with open(_ALERTS_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(registro, ensure_ascii=False) + "\n")
+    except Exception as e:
+        logger.warning(f"[registrar_alerta] no se pudo registrar: {e}")
+
+
 def alert_if_critical(
     severity: str,
     project: str,
@@ -1205,6 +1238,10 @@ Action required from operations leadership.
                 logger.error(f"[alert_if_critical] envío a {destinatario}: {e}")
     except Exception as e:
         logger.error(f"[alert_if_critical] conexión Gmail: {e}")
+
+    # Persistir la alerta para el dashboard (aunque el envio hubiera fallado,
+    # el evento CRITICAL igual ocurrio y debe quedar registrado).
+    registrar_alerta(severity_upper, project, summary, timestamp, enviados)
 
     return {
         "alert_sent": len(enviados) > 0,
