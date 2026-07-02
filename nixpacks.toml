@@ -1,0 +1,13 @@
+# nixpacks.toml — JRS Agente (worker)
+# -------------------------------------------------------------------
+# Ya NO se necesita 'tesseract-ocr': las imágenes se procesan con la
+# visión NATIVA de Claude, no con OCR. Por eso NO hay paquetes de
+# sistema aquí. Nixpacks detecta el proyecto Python y instala las
+# dependencias desde requirements.txt automáticamente.
+#
+# Lo único que fijamos es el comando de arranque del worker, para que
+# Railway siempre ejecute el agente (no un servidor web ni un guess).
+# -------------------------------------------------------------------
+
+[start]
+cmd = "python agent.py"
