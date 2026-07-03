@@ -12,6 +12,7 @@
 #   - get_clients_at_risk   -> stub (analisis predictivo, Paso 7.4) [FUTURO]
 
 import os
+import re
 import json
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -334,22 +335,36 @@ _STATUS_SEVERITY = {"DELAYED": 3, "ATTENTION": 2, "ON TRACK": 1, "": 0}
 _SEVERITY_LABEL = {3: "DELAYED", 2: "ATTENTION", 1: "ON TRACK", 0: "—"}
 
 # Un proyecto se considera COMPLETADO cuando su crew mas reciente reporta un
-# status de finalizacion EXPLICITO. No basta con que el status este vacio o
-# desconocido (eso sigue siendo gris "—", no completado). Para agregar
-# variantes que usen tus crews, anade la palabra (en MAYUSCULAS) a este set.
+# status que CONTIENE una palabra de finalizacion. Se hace por token (no
+# match exacto) para reconocer status compuestos como "ON TRACK — COMPLETED".
+# Un status vacio o "ON TRACK" a secas NO cuenta como completado. Para agregar
+# variantes, anade la palabra (en MAYUSCULAS) a este set.
 _COMPLETED_STATUSES = {"COMPLETED", "COMPLETE", "DONE", "FINISHED", "CLOSED"}
 
 
 def _es_completado(crew: Dict) -> bool:
-    """True si el status del crew indica finalizacion explicita."""
-    return (crew.get("status", "") or "").strip().upper() in _COMPLETED_STATUSES
+    """
+    True si el status del crew contiene una palabra de finalizacion.
+    Tokeniza por palabras (ignora guiones/puntuacion), asi:
+      "ON TRACK — COMPLETED" -> completado
+      "ON TRACK"             -> NO completado
+    """
+    status = (crew.get("status", "") or "").upper()
+    tokens = set(re.findall(r"[A-Z]+", status))
+    return bool(tokens & _COMPLETED_STATUSES)
 
 
-def _best_crew_por_proyecto() -> Dict[str, Dict]:
+def _best_crew_por_proyecto(window_days=None) -> Dict[str, Dict]:
     """
     Escanea collection_jrs_history y devuelve, por proyecto, el crew del
-    reporte MAS RECIENTE dentro de la ventana de ACTIVE_WINDOW_DAYS.
-    Forma: {project: {"fecha": date, "crew": dict, "fecha_str": str}}.
+    reporte MAS RECIENTE. Forma: {project: {"fecha": date, "crew": dict,
+    "fecha_str": str}}.
+
+    window_days:
+      - None  -> considera TODA la historia (sin limite de fecha). Se usa para
+                 determinar el estado ACTUAL de cada proyecto y para la carpeta
+                 Completed, que debe acumular sin caducar.
+      - N     -> solo entradas de los ultimos N dias (recencia de vistas activas).
 
     Base compartida por el detalle activo, el mapa y la lista de completados.
     Robusto ante registros viejos o crews_json malformado.
@@ -362,7 +377,10 @@ def _best_crew_por_proyecto() -> Dict[str, Dict]:
         return {}
 
     metadatas = data.get("metadatas") or []
-    cutoff = (datetime.now() - timedelta(days=ACTIVE_WINDOW_DAYS)).date()
+    cutoff = (
+        (datetime.now() - timedelta(days=window_days)).date()
+        if window_days is not None else None
+    )
 
     best: Dict[str, Dict] = {}  # project -> {fecha, crew, fecha_str}
     for meta in metadatas:
@@ -376,7 +394,7 @@ def _best_crew_por_proyecto() -> Dict[str, Dict]:
             fecha = datetime.strptime(fecha_str, "%Y-%m-%d").date()
         except Exception:
             continue
-        if fecha < cutoff:
+        if cutoff is not None and fecha < cutoff:
             continue
         try:
             crews = json.loads(crews_raw)
@@ -426,7 +444,7 @@ def get_project_details() -> List[Dict]:
     completados viven en su propia carpeta; el mapa se construye sobre esta
     funcion, asi que tambien queda filtrado.
     """
-    best = _best_crew_por_proyecto()
+    best = _best_crew_por_proyecto(window_days=ACTIVE_WINDOW_DAYS)
     archivados = set(get_archivados())
 
     resultados = [
