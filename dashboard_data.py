@@ -15,9 +15,11 @@ import os
 import json
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import List, Dict
+from typing import List, Dict, Tuple
 
 from chromadb import PersistentClient
+
+from ciudades_coords import resolver_coords
 
 # Mismas rutas/variables que usa el agente, para leer del mismo volumen.
 CHROMA_DB_PATH = os.getenv("CHROMA_DB_PATH", "./chroma_data")
@@ -330,17 +332,34 @@ def get_project_details() -> List[Dict]:
 
 def get_crew_map_data() -> List[Dict]:
     """
-    Agrega por estado (2 letras) para el mapa. Cada item:
-    state, count (proyectos activos), worst_status, projects (lista).
+    Agrega por CIUDAD para el mapa de burbujas. Cada item:
+    city, state, lat, lon, count (proyectos activos en esa ubicacion),
+    worst_status, projects (lista separada por coma).
+
+    Usa resolver_coords (ciudades_coords.py) para traducir la ubicacion a
+    lat/lon. Si una ubicacion no resuelve (sin ciudad ni estado reconocible)
+    se omite del mapa. Proyectos que caen al mismo punto (misma ciudad o
+    mismo centroide de estado por fallback) se agrupan en una sola burbuja.
     """
     detalles = get_project_details()
-    por_estado: Dict[str, Dict] = {}
+    por_punto: Dict[Tuple[float, float], Dict] = {}
     for d in detalles:
-        est = d.get("state", "")
-        if not est:
+        location = d.get("location", "")
+        state = d.get("state", "")
+        coords = resolver_coords(location, state)
+        if coords is None:
             continue
-        e = por_estado.setdefault(
-            est, {"state": est, "count": 0, "worst": 0, "projects": []}
+        e = por_punto.setdefault(
+            coords,
+            {
+                "city": location or state,
+                "state": state,
+                "lat": coords[0],
+                "lon": coords[1],
+                "count": 0,
+                "worst": 0,
+                "projects": [],
+            },
         )
         e["count"] += 1
         e["projects"].append(d.get("project", ""))
@@ -349,9 +368,12 @@ def get_crew_map_data() -> List[Dict]:
             e["worst"] = sev
 
     salida = []
-    for e in por_estado.values():
+    for e in por_punto.values():
         salida.append({
+            "city": e["city"],
             "state": e["state"],
+            "lat": e["lat"],
+            "lon": e["lon"],
             "count": e["count"],
             "worst_status": _SEVERITY_LABEL.get(e["worst"], "—"),
             "projects": ", ".join(p for p in e["projects"] if p),

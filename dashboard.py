@@ -184,19 +184,25 @@ else:
 
 st.divider()
 
-# ----- CREW MAP BY STATE (por riesgo) -----
-st.subheader("🗺️ Crew Map by State")
-st.caption("Color por riesgo: peor estado de cada estado (rojo/amarillo/verde)")
+# ----- CREW MAP (burbujas por ciudad) -----
+st.subheader("🗺️ Crew Map")
+st.caption(
+    "Ubicación de cada crew · color por status (rojo/amarillo/verde), "
+    "tamaño por nº de proyectos en el punto"
+)
 
 _map = get_crew_map_data()
 if _map:
     _df_map = pd.DataFrame(_map)
-    _fig_risk = px.choropleth(
+    _fig_map = px.scatter_geo(
         _df_map,
-        locations="state",
-        locationmode="USA-states",
+        lat="lat",
+        lon="lon",
         scope="usa",
         color="worst_status",
+        size="count",
+        size_max=28,
+        hover_name="city",
         category_orders={"worst_status": ["DELAYED", "ATTENTION", "ON TRACK", "—"]},
         color_discrete_map={
             "DELAYED": "#E24B4A",
@@ -205,10 +211,17 @@ if _map:
             "—": "#cccccc",
         },
         labels={"worst_status": "Status"},
-        hover_data=["count", "projects"],
+        hover_data={
+            "lat": False,
+            "lon": False,
+            "state": True,
+            "count": True,
+            "projects": True,
+        },
     )
-    _fig_risk.update_layout(margin=dict(l=0, r=0, t=0, b=0), height=420)
-    st.plotly_chart(_fig_risk, width='stretch')
+    _fig_map.update_layout(margin=dict(l=0, r=0, t=0, b=0), height=420)
+    _fig_map.update_geos(bgcolor="rgba(0,0,0,0)", lakecolor="rgba(0,0,0,0)")
+    st.plotly_chart(_fig_map, width='stretch')
 else:
     st.info("Sin datos de ubicación todavía. Llegan con los próximos crew updates.")
 
