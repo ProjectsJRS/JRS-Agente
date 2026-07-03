@@ -191,9 +191,9 @@ def get_active_projects() -> List[Dict]:
     resultados.sort(key=lambda x: x["last_update"], reverse=True)
     resultados.sort(key=lambda x: orden_riesgo.get(x["risk_level"], 5))
 
-    # Ocultar los proyectos archivados (gestionados desde el dashboard).
-    archivados = set(get_archivados())
-    return [r for r in resultados if r.get("project") not in archivados]
+    # Ocultar archivados (manual) y completados (status de finalizacion).
+    ocultar = set(get_archivados()) | get_completed_project_codes()
+    return [r for r in resultados if r.get("project") not in ocultar]
 
 
 # =====================================================
@@ -333,20 +333,33 @@ def get_clients_at_risk() -> List[Dict]:
 _STATUS_SEVERITY = {"DELAYED": 3, "ATTENTION": 2, "ON TRACK": 1, "": 0}
 _SEVERITY_LABEL = {3: "DELAYED", 2: "ATTENTION", 1: "ON TRACK", 0: "—"}
 
+# Un proyecto se considera COMPLETADO cuando su crew mas reciente reporta un
+# status de finalizacion EXPLICITO. No basta con que el status este vacio o
+# desconocido (eso sigue siendo gris "—", no completado). Para agregar
+# variantes que usen tus crews, anade la palabra (en MAYUSCULAS) a este set.
+_COMPLETED_STATUSES = {"COMPLETED", "COMPLETE", "DONE", "FINISHED", "CLOSED"}
 
-def get_project_details() -> List[Dict]:
+
+def _es_completado(crew: Dict) -> bool:
+    """True si el status del crew indica finalizacion explicita."""
+    return (crew.get("status", "") or "").strip().upper() in _COMPLETED_STATUSES
+
+
+def _best_crew_por_proyecto() -> Dict[str, Dict]:
     """
-    Detalle por proyecto (ultimos 7 dias) desde crews_json.
-    Cada item trae los campos del crew mas reciente de ese proyecto:
-    project, location, state, crew, members, status, days_on_site,
-    progress, incidents, last_update.
+    Escanea collection_jrs_history y devuelve, por proyecto, el crew del
+    reporte MAS RECIENTE dentro de la ventana de ACTIVE_WINDOW_DAYS.
+    Forma: {project: {"fecha": date, "crew": dict, "fecha_str": str}}.
+
+    Base compartida por el detalle activo, el mapa y la lista de completados.
+    Robusto ante registros viejos o crews_json malformado.
     """
     try:
         client = PersistentClient(path=CHROMA_DB_PATH)
         col = client.get_or_create_collection(name=COLECCION_HISTORIA)
         data = col.get(include=["metadatas"])
     except Exception:
-        return []
+        return {}
 
     metadatas = data.get("metadatas") or []
     cutoff = (datetime.now() - timedelta(days=ACTIVE_WINDOW_DAYS)).date()
@@ -376,21 +389,74 @@ def get_project_details() -> List[Dict]:
             actual = best.get(proj)
             if actual is None or fecha >= actual["fecha"]:
                 best[proj] = {"fecha": fecha, "crew": crew, "fecha_str": fecha_str}
+    return best
 
-    resultados = []
-    for proj, info in best.items():
-        item = dict(info["crew"])
-        item["project"] = proj
-        item["last_update"] = info["fecha_str"]
-        resultados.append(item)
+
+def _item_desde_best(proj: str, info: Dict) -> Dict:
+    """Arma el dict plano de un proyecto a partir de su crew mas reciente."""
+    item = dict(info["crew"])
+    item["project"] = proj
+    item["last_update"] = info["fecha_str"]
+    return item
+
+
+def get_completed_project_codes() -> set:
+    """
+    Codigos de proyecto cuyo crew mas reciente reporta finalizacion explicita.
+    Excluye los archivados: el archivado MANUAL manda sobre el completado auto
+    (un proyecto archivado vive solo en la carpeta Archived). Alimenta la
+    exclusion de completados en las vistas activas.
+    """
+    archivados = set(get_archivados())
+    return {
+        proj
+        for proj, info in _best_crew_por_proyecto().items()
+        if proj not in archivados and _es_completado(info["crew"])
+    }
+
+
+def get_project_details() -> List[Dict]:
+    """
+    Detalle por proyecto ACTIVO (ultimos 7 dias) desde crews_json.
+    Cada item trae los campos del crew mas reciente de ese proyecto:
+    project, location, state, crew, members, status, days_on_site,
+    progress, incidents, last_update.
+
+    Excluye archivados (manual) y completados (status de finalizacion). Los
+    completados viven en su propia carpeta; el mapa se construye sobre esta
+    funcion, asi que tambien queda filtrado.
+    """
+    best = _best_crew_por_proyecto()
+    archivados = set(get_archivados())
+
+    resultados = [
+        _item_desde_best(proj, info)
+        for proj, info in best.items()
+        if proj not in archivados and not _es_completado(info["crew"])
+    ]
 
     # Orden: peor status primero, luego mas reciente.
     resultados.sort(key=lambda x: x.get("last_update", ""), reverse=True)
     resultados.sort(key=lambda x: _STATUS_SEVERITY.get(x.get("status", ""), 0), reverse=True)
+    return resultados
 
-    # Ocultar archivados (esto tambien filtra el mapa, que se construye sobre esta funcion).
+
+def get_completed_projects() -> List[Dict]:
+    """
+    Proyectos COMPLETADOS (crew mas reciente con status de finalizacion),
+    excluyendo los archivados. Alimenta la carpeta 'Completed projects' del
+    panel lateral. Mismos campos que get_project_details, mas recientes primero.
+    """
+    best = _best_crew_por_proyecto()
     archivados = set(get_archivados())
-    return [r for r in resultados if r.get("project") not in archivados]
+
+    resultados = [
+        _item_desde_best(proj, info)
+        for proj, info in best.items()
+        if proj not in archivados and _es_completado(info["crew"])
+    ]
+    resultados.sort(key=lambda x: x.get("last_update", ""), reverse=True)
+    return resultados
 
 
 def get_crew_map_data() -> List[Dict]:

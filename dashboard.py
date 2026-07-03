@@ -20,6 +20,7 @@ from dashboard_data import (
     get_project_details,
     get_crew_map_data,
     get_operational_metrics,
+    get_completed_projects,
     get_archivados,
     archivar_proyecto,
     reactivar_proyecto,
@@ -90,7 +91,7 @@ if st.session_state.get("username") in _ADMIN_USERS:
         _activos = [p["project"] for p in get_active_projects()]
         if _activos:
             _sel = st.selectbox(
-                "Archive (mark completed)",
+                "Archive (hide from views)",
                 ["—"] + _activos,
                 key="archivar_sel",
             )
@@ -103,17 +104,56 @@ if st.session_state.get("username") in _ADMIN_USERS:
         else:
             st.caption("No active projects.")
 
+        # ----- ARCHIVED (manual) — con buscador -----
         _arch = get_archivados()
         if _arch:
             st.caption("Archived (click ↩ to restore):")
-            for _p in _arch:
+            _q_arch = st.text_input(
+                "Search archived", key="search_arch",
+                placeholder="Search…", label_visibility="collapsed",
+            )
+            _arch_view = (
+                [p for p in _arch if _q_arch.lower() in p.lower()]
+                if _q_arch else _arch
+            )
+            for _p in _arch_view:
                 _ca, _cb = st.columns([3, 1])
                 _ca.write(_p)
                 if _cb.button("↩", key=f"react_{_p}", help=f"Restore {_p}"):
                     reactivar_proyecto(_p)
                     st.rerun()
+            if _q_arch and not _arch_view:
+                st.caption("No matches.")
         else:
             st.caption("No archived projects.")
+
+        # ----- COMPLETED (auto: status de finalizacion) — con buscador -----
+        # Lista calculada: un proyecto entra aqui cuando su crew mas reciente
+        # reporta COMPLETED/DONE/... No hay accion manual; se mueve solo.
+        st.divider()
+        st.markdown("### ✅ Completed projects")
+        _comp = get_completed_projects()
+        if _comp:
+            _q_comp = st.text_input(
+                "Search completed", key="search_comp",
+                placeholder="Search…", label_visibility="collapsed",
+            )
+            _comp_view = (
+                [
+                    c for c in _comp
+                    if _q_comp.lower()
+                    in f"{c.get('project', '')} {c.get('location', '')}".lower()
+                ]
+                if _q_comp else _comp
+            )
+            for _c in _comp_view:
+                _proj = _c.get("project", "")
+                _loc = _c.get("location", "")
+                st.write(f"{_proj} — {_loc}" if _loc else _proj)
+            if _q_comp and not _comp_view:
+                st.caption("No matches.")
+        else:
+            st.caption("No completed projects.")
 
 # ----- HEADER -----
 col1, col2, col3 = st.columns([2, 1, 1])

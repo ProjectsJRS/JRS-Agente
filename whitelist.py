@@ -44,6 +44,11 @@ WHITELIST = {
         "role": "Operations Hub",
         "can_approve_external": False,
         "tone": "operacional, neutral",
+        # Display names aceptados ademas del canonico. La cuenta Gmail del hub
+        # tiene display name "joe jrs"; se declara aqui para no marcarlo como
+        # spoofing en cada crew update. Es una excepcion EXPLICITA y controlada,
+        # no un debilitamiento del chequeo.
+        "display_aliases": ["joe jrs"],
     },
 }
  
@@ -87,10 +92,21 @@ def verify_sender(sender_raw: str) -> dict:
         # Detección básica de spoofing: el name display debe coincidir
         name_in_raw = sender_raw.split("<")[0].strip().lower() if "<" in sender_raw else ""
         expected_name = info["name"].lower()
+        # Nombres de display aceptados: el canonico + alias declarados en la
+        # whitelist. Algunos buzones (ej. projects@ = "joe jrs") tienen un
+        # display distinto al nombre canonico; se aceptan por alias para no
+        # marcarlos como spoofing. Sin alias, el comportamiento es identico al
+        # original (solo se compara contra expected_name).
+        nombres_ok = [expected_name] + [
+            a.strip().lower() for a in info.get("display_aliases", []) if a
+        ]
         spoofing = "low"
         razon = "Match en whitelist."
-        if name_in_raw and expected_name not in name_in_raw and name_in_raw not in expected_name:
-            # El display name no coincide → posible spoofing
+        coincide = any(
+            n and (n in name_in_raw or name_in_raw in n) for n in nombres_ok
+        )
+        if name_in_raw and not coincide:
+            # El display name no coincide con ninguno aceptado → posible spoofing
             spoofing = "medium"
             razon = (
                 f"Match en whitelist por email, pero display name "
