@@ -33,6 +33,54 @@ ACTIVE_WINDOW_DAYS = 7
 
 COLECCION_HISTORIA = "collection_jrs_history"
 
+# =====================================================
+# PROYECTOS ARCHIVADOS — gestion sin código ni deploy.
+# La lista vive en el volumen (/data en Railway, ./ en local), igual que
+# heartbeat/alerts/config. Archivar/reactivar es instantaneo desde el
+# dashboard: no requiere commit ni redeploy. Un proyecto archivado deja de
+# aparecer en Active Projects, Project Detail y el mapa.
+# =====================================================
+ARCHIVADOS_FILE = os.path.join(_VOLUME_DIR, "archivados.json")
+
+
+def get_archivados() -> List[str]:
+    """Devuelve la lista de codigos de proyecto archivados. [] si no existe."""
+    try:
+        with open(ARCHIVADOS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            return [str(p) for p in data]
+    except Exception:
+        pass
+    return []
+
+
+def _guardar_archivados(lista: List[str]) -> bool:
+    try:
+        # Sin duplicados, orden estable.
+        unicos = sorted(set(p for p in lista if p))
+        with open(ARCHIVADOS_FILE, "w", encoding="utf-8") as f:
+            json.dump(unicos, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception:
+        return False
+
+
+def archivar_proyecto(project: str) -> bool:
+    """Marca un proyecto como archivado (deja de aparecer en las secciones activas)."""
+    if not project:
+        return False
+    actuales = get_archivados()
+    if project not in actuales:
+        actuales.append(project)
+    return _guardar_archivados(actuales)
+
+
+def reactivar_proyecto(project: str) -> bool:
+    """Quita un proyecto de la lista de archivados (vuelve a aparecer)."""
+    actuales = [p for p in get_archivados() if p != project]
+    return _guardar_archivados(actuales)
+
 
 def get_agent_status() -> Dict:
     """
@@ -140,7 +188,10 @@ def get_active_projects() -> List[Dict]:
     orden_riesgo = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3, "—": 4}
     resultados.sort(key=lambda x: x["last_update"], reverse=True)
     resultados.sort(key=lambda x: orden_riesgo.get(x["risk_level"], 5))
-    return resultados
+
+    # Ocultar los proyectos archivados (gestionados desde el dashboard).
+    archivados = set(get_archivados())
+    return [r for r in resultados if r.get("project") not in archivados]
 
 
 # =====================================================
@@ -271,7 +322,10 @@ def get_project_details() -> List[Dict]:
     # Orden: peor status primero, luego mas reciente.
     resultados.sort(key=lambda x: x.get("last_update", ""), reverse=True)
     resultados.sort(key=lambda x: _STATUS_SEVERITY.get(x.get("status", ""), 0), reverse=True)
-    return resultados
+
+    # Ocultar archivados (esto tambien filtra el mapa, que se construye sobre esta funcion).
+    archivados = set(get_archivados())
+    return [r for r in resultados if r.get("project") not in archivados]
 
 
 def get_crew_map_data() -> List[Dict]:

@@ -19,6 +19,9 @@ from dashboard_data import (
     get_recent_alerts,
     get_project_details,
     get_crew_map_data,
+    get_archivados,
+    archivar_proyecto,
+    reactivar_proyecto,
 )
 
 st.set_page_config(
@@ -73,6 +76,43 @@ st.markdown('<meta http-equiv="refresh" content="60">', unsafe_allow_html=True)
 with st.sidebar:
     st.caption(f"Sesión: {st.session_state.get('name', '')}")
     authenticator.logout("Cerrar sesión", "sidebar")
+
+# ----- PANEL DE GESTION DE PROYECTOS (solo Richard y Emmanuel) -----
+# Archivar/reactivar escribe en archivados.json en el volumen: instantaneo,
+# sin commit ni deploy. Un proyecto archivado desaparece de todas las secciones.
+_ADMIN_USERS = {"richard", "emmanuel"}
+if st.session_state.get("username") in _ADMIN_USERS:
+    with st.sidebar:
+        st.divider()
+        st.markdown("### 🗂️ Gestionar proyectos")
+
+        _activos = [p["project"] for p in get_active_projects()]
+        if _activos:
+            _sel = st.selectbox(
+                "Archivar (marcar completado)",
+                ["—"] + _activos,
+                key="archivar_sel",
+            )
+            if st.button("Archivar", key="btn_archivar", disabled=(_sel == "—")):
+                if archivar_proyecto(_sel):
+                    st.success(f"Archivado: {_sel}")
+                    st.rerun()
+                else:
+                    st.error("No se pudo archivar.")
+        else:
+            st.caption("No hay proyectos activos.")
+
+        _arch = get_archivados()
+        if _arch:
+            st.caption("Archivados (clic ↩ para reactivar):")
+            for _p in _arch:
+                _ca, _cb = st.columns([3, 1])
+                _ca.write(_p)
+                if _cb.button("↩", key=f"react_{_p}", help=f"Reactivar {_p}"):
+                    reactivar_proyecto(_p)
+                    st.rerun()
+        else:
+            st.caption("Sin proyectos archivados.")
 
 # ----- HEADER -----
 col1, col2, col3 = st.columns([2, 1, 1])
