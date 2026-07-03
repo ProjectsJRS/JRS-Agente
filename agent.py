@@ -41,6 +41,7 @@ from tools import (
     marcar_como_procesado,
 )
 from client_protocols import get_protocol
+from metrics import registrar_metrica
 
 load_dotenv()  # En local lee .env. En Railway no hay .env: lee las env vars del panel.
 
@@ -63,7 +64,7 @@ MODELO = os.getenv("AGENT_MODEL", "claude-opus-4-8")
 # Sube este número CADA vez que despliegas. En los logs de Railway debe
 # aparecer en cada arranque y cada ciclo. Si no ves este valor, Railway está
 # corriendo una imagen CACHEADA (código viejo) — redeploy limpio.
-BUILD_VERSION = "2026-07-03_city-bubbles"
+BUILD_VERSION = "2026-07-03_operational-metrics"
 
 SLEEP_BETWEEN_CYCLES_SECONDS = int(os.getenv("SLEEP_BETWEEN_CYCLES_SECONDS", "300"))
 MAX_EMAILS_PER_CYCLE = int(os.getenv("MAX_EMAILS_PER_CYCLE", "10"))
@@ -1042,6 +1043,7 @@ def procesar_un_correo(correo: dict) -> dict:
         "result": "processed",
         "iterations": iteraciones,
         "draft_id": draft_id,
+        "report_generated": bool(report_text),
     }
 
 
@@ -1268,7 +1270,15 @@ async def main():
                 if len(correos) == MAX_EMAILS_PER_CYCLE:
                     logger.info(f"{len(correos)} correo(s) procesados...")
                 for correo in correos:
+                    _t0 = datetime.now()
                     resultado = procesar_un_correo(correo)
+                    _dur = round((datetime.now() - _t0).total_seconds(), 2)
+                    registrar_metrica(
+                        "email_processed",
+                        result=resultado.get("result", ""),
+                        duration_sec=_dur,
+                        report_generated=bool(resultado.get("report_generated")),
+                    )
                     logger.info(f"Resultado: {resultado}")
 
             consecutive_failures = 0  # reset al completar el ciclo con exito

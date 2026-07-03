@@ -200,6 +200,7 @@ def get_active_projects() -> List[Dict]:
 # STUBS — se conectaran a datos reales en pasos siguientes.
 # =====================================================
 ALERTS_FILE = os.path.join(_VOLUME_DIR, "alerts.jsonl")
+METRICS_FILE = os.path.join(_VOLUME_DIR, "metrics.jsonl")
 
 
 def get_recent_alerts(hours: int = 24) -> List[Dict]:
@@ -240,14 +241,76 @@ def get_recent_alerts(hours: int = 24) -> List[Dict]:
     return alertas
 
 
-def get_operational_metrics() -> Dict:
-    """Metricas operativas. PENDIENTE: agregaciones de logs.
-    Nota: 'WhatsApp messages' se elimino del alcance (no aplica a JRS)."""
+def get_operational_metrics(days: int = ACTIVE_WINDOW_DAYS) -> Dict:
+    """
+    Agrega metricas operativas de los ultimos `days` dias.
+
+    Fuentes:
+      - metrics.jsonl (escrito por el agente): emails_processed, avg_processing,
+        reports_generated.
+      - alerts.jsonl (ya existente): alerts_count.
+
+    Robusto: si un archivo no existe o una linea esta corrupta, la salta.
+    Si aun no hay datos, los contadores son 0 y avg_processing es '—'.
+    Nota: 'WhatsApp messages' se elimino del alcance (no aplica a JRS).
+    """
+    cutoff = datetime.now() - timedelta(days=days)
+
+    emails = 0
+    reportes = 0
+    duraciones: List[float] = []
+    try:
+        with open(METRICS_FILE, "r", encoding="utf-8") as f:
+            for linea in f:
+                linea = linea.strip()
+                if not linea:
+                    continue
+                try:
+                    reg = json.loads(linea)
+                    ts = datetime.strptime(reg["timestamp"], "%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    continue
+                if ts < cutoff:
+                    continue
+                if reg.get("event") == "email_processed":
+                    emails += 1
+                    if reg.get("report_generated"):
+                        reportes += 1
+                    d = reg.get("duration_sec")
+                    if isinstance(d, (int, float)):
+                        duraciones.append(float(d))
+    except Exception:
+        pass
+
+    # Alertas: reutilizamos alerts.jsonl. No duplicamos el registro en metrics.
+    alertas = 0
+    try:
+        with open(ALERTS_FILE, "r", encoding="utf-8") as f:
+            for linea in f:
+                linea = linea.strip()
+                if not linea:
+                    continue
+                try:
+                    reg = json.loads(linea)
+                    ts = datetime.strptime(reg["timestamp"], "%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    continue
+                if ts >= cutoff:
+                    alertas += 1
+    except Exception:
+        pass
+
+    if duraciones:
+        avg = sum(duraciones) / len(duraciones)
+        avg_processing = f"{avg:.0f}s" if avg >= 1 else f"{avg:.1f}s"
+    else:
+        avg_processing = "—"
+
     return {
-        "emails_processed": "—",
-        "alerts_count": "—",
-        "reports_generated": "—",
-        "avg_processing": "—",
+        "emails_processed": emails,
+        "reports_generated": reportes,
+        "alerts_count": alertas,
+        "avg_processing": avg_processing,
     }
 
 

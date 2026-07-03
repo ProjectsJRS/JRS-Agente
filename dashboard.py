@@ -19,6 +19,7 @@ from dashboard_data import (
     get_recent_alerts,
     get_project_details,
     get_crew_map_data,
+    get_operational_metrics,
     get_archivados,
     archivar_proyecto,
     reactivar_proyecto,
@@ -44,8 +45,8 @@ try:
         _config = yaml.load(_f, Loader=SafeLoader)
 except FileNotFoundError:
     st.error(
-        "Falta config.yaml — la autenticacion no esta configurada. "
-        "Genera el archivo con generar_config.py."
+        "config.yaml is missing — authentication is not configured. "
+        "Generate the file with generar_config.py."
     )
     st.stop()
 
@@ -61,10 +62,10 @@ authenticator.login(location="main")
 
 _auth = st.session_state.get("authentication_status")
 if _auth is False:
-    st.error("Usuario o contraseña incorrectos.")
+    st.error("Incorrect username or password.")
     st.stop()
 elif _auth is None:
-    st.warning("Ingresa tus credenciales para ver el dashboard.")
+    st.warning("Enter your credentials to view the dashboard.")
     st.stop()
 
 # ===== A partir de aqui, el usuario esta autenticado =====
@@ -74,8 +75,8 @@ elif _auth is None:
 st.markdown('<meta http-equiv="refresh" content="60">', unsafe_allow_html=True)
 
 with st.sidebar:
-    st.caption(f"Sesión: {st.session_state.get('name', '')}")
-    authenticator.logout("Cerrar sesión", "sidebar")
+    st.caption(f"Session: {st.session_state.get('name', '')}")
+    authenticator.logout("Sign out", "sidebar")
 
 # ----- PANEL DE GESTION DE PROYECTOS (solo Richard y Emmanuel) -----
 # Archivar/reactivar escribe en archivados.json en el volumen: instantaneo,
@@ -84,35 +85,35 @@ _ADMIN_USERS = {"richard", "emmanuel"}
 if st.session_state.get("username") in _ADMIN_USERS:
     with st.sidebar:
         st.divider()
-        st.markdown("### 🗂️ Gestionar proyectos")
+        st.markdown("### 🗂️ Manage projects")
 
         _activos = [p["project"] for p in get_active_projects()]
         if _activos:
             _sel = st.selectbox(
-                "Archivar (marcar completado)",
+                "Archive (mark completed)",
                 ["—"] + _activos,
                 key="archivar_sel",
             )
-            if st.button("Archivar", key="btn_archivar", disabled=(_sel == "—")):
+            if st.button("Archive", key="btn_archivar", disabled=(_sel == "—")):
                 if archivar_proyecto(_sel):
-                    st.success(f"Archivado: {_sel}")
+                    st.success(f"Archived: {_sel}")
                     st.rerun()
                 else:
-                    st.error("No se pudo archivar.")
+                    st.error("Could not archive.")
         else:
-            st.caption("No hay proyectos activos.")
+            st.caption("No active projects.")
 
         _arch = get_archivados()
         if _arch:
-            st.caption("Archivados (clic ↩ para reactivar):")
+            st.caption("Archived (click ↩ to restore):")
             for _p in _arch:
                 _ca, _cb = st.columns([3, 1])
                 _ca.write(_p)
-                if _cb.button("↩", key=f"react_{_p}", help=f"Reactivar {_p}"):
+                if _cb.button("↩", key=f"react_{_p}", help=f"Restore {_p}"):
                     reactivar_proyecto(_p)
                     st.rerun()
         else:
-            st.caption("Sin proyectos archivados.")
+            st.caption("No archived projects.")
 
 # ----- HEADER -----
 col1, col2, col3 = st.columns([2, 1, 1])
@@ -138,7 +139,7 @@ st.divider()
 
 # ----- ACTIVE PROJECTS (datos reales) -----
 st.subheader("📋 Active Projects")
-st.caption("Últimos 7 días · estado por nivel de riesgo del reporte más reciente")
+st.caption("Last 7 days · status by risk level of the most recent report")
 
 projects = get_active_projects()
 if projects:
@@ -154,13 +155,13 @@ if projects:
     )
     st.dataframe(df, hide_index=True, width='stretch')
 else:
-    st.info("No hay proyectos activos en los últimos 7 días.")
+    st.info("No active projects in the last 7 days.")
 
 st.divider()
 
 # ----- PROJECT DETAIL (expandible por proyecto, desde crews_json) -----
 st.subheader("🔎 Project Detail")
-st.caption("Detalle por crew · despliega cada proyecto para ver más")
+st.caption("Per-crew detail · expand each project for more")
 
 _detalles = get_project_details()
 if _detalles:
@@ -180,15 +181,15 @@ if _detalles:
             st.markdown(f"**Incidents:** {_d.get('incidents', '') or 'none'}")
             st.caption(f"Last update: {_d.get('last_update', '')}")
 else:
-    st.info("Sin detalle por crew todavía. Llega con los próximos crew updates.")
+    st.info("No crew detail yet. It arrives with the next crew updates.")
 
 st.divider()
 
 # ----- CREW MAP (burbujas por ciudad) -----
 st.subheader("🗺️ Crew Map")
 st.caption(
-    "Ubicación de cada crew · color por status (rojo/amarillo/verde), "
-    "tamaño por nº de proyectos en el punto"
+    "Each crew's location · color by status (red/amber/green), "
+    "size by number of projects at the point"
 )
 
 _map = get_crew_map_data()
@@ -223,7 +224,7 @@ if _map:
     _fig_map.update_geos(bgcolor="rgba(0,0,0,0)", lakecolor="rgba(0,0,0,0)")
     st.plotly_chart(_fig_map, width='stretch')
 else:
-    st.info("Sin datos de ubicación todavía. Llegan con los próximos crew updates.")
+    st.info("No location data yet. It arrives with the next crew updates.")
 
 st.divider()
 
@@ -249,7 +250,14 @@ else:
     st.success("No critical alerts in the last 24 hours.")
 
 st.subheader("📊 Operational Metrics")
-st.info("Próximamente — agregaciones de los últimos 7 días.")
+st.caption("Last 7 days")
+
+_m = get_operational_metrics()
+_mc1, _mc2, _mc3, _mc4 = st.columns(4)
+_mc1.metric("Emails processed", _m["emails_processed"])
+_mc2.metric("Reports generated", _m["reports_generated"])
+_mc3.metric("Alerts", _m["alerts_count"])
+_mc4.metric("Avg processing time", _m["avg_processing"])
 
 st.divider()
 st.caption(
