@@ -207,3 +207,99 @@ def get_clients_at_risk() -> List[Dict]:
     """Clientes en pre-escalacion. FUTURO: analisis predictivo (Paso 7.4).
     RECORDATORIO: esta seccion es SOLO para Richard."""
     return []
+
+
+# =====================================================
+# DETALLE POR CREW / MAPA — leen el crews_json guardado por el agente.
+# Ambas usan la ventana de ACTIVE_WINDOW_DAYS y se quedan con el reporte
+# mas reciente por proyecto. Robustas ante registros viejos sin crews_json.
+# =====================================================
+_STATUS_SEVERITY = {"DELAYED": 3, "ATTENTION": 2, "ON TRACK": 1, "": 0}
+_SEVERITY_LABEL = {3: "DELAYED", 2: "ATTENTION", 1: "ON TRACK", 0: "—"}
+
+
+def get_project_details() -> List[Dict]:
+    """
+    Detalle por proyecto (ultimos 7 dias) desde crews_json.
+    Cada item trae los campos del crew mas reciente de ese proyecto:
+    project, location, state, crew, members, status, days_on_site,
+    progress, incidents, last_update.
+    """
+    try:
+        client = PersistentClient(path=CHROMA_DB_PATH)
+        col = client.get_or_create_collection(name=COLECCION_HISTORIA)
+        data = col.get(include=["metadatas"])
+    except Exception:
+        return []
+
+    metadatas = data.get("metadatas") or []
+    cutoff = (datetime.now() - timedelta(days=ACTIVE_WINDOW_DAYS)).date()
+
+    best: Dict[str, Dict] = {}  # project -> {fecha, crew, fecha_str}
+    for meta in metadatas:
+        if not meta:
+            continue
+        crews_raw = meta.get("crews_json", "")
+        fecha_str = meta.get("date", "")
+        if not crews_raw or not fecha_str:
+            continue
+        try:
+            fecha = datetime.strptime(fecha_str, "%Y-%m-%d").date()
+        except Exception:
+            continue
+        if fecha < cutoff:
+            continue
+        try:
+            crews = json.loads(crews_raw)
+        except Exception:
+            continue
+        for crew in crews:
+            proj = crew.get("project", "")
+            if not proj:
+                continue
+            actual = best.get(proj)
+            if actual is None or fecha >= actual["fecha"]:
+                best[proj] = {"fecha": fecha, "crew": crew, "fecha_str": fecha_str}
+
+    resultados = []
+    for proj, info in best.items():
+        item = dict(info["crew"])
+        item["project"] = proj
+        item["last_update"] = info["fecha_str"]
+        resultados.append(item)
+
+    # Orden: peor status primero, luego mas reciente.
+    resultados.sort(key=lambda x: x.get("last_update", ""), reverse=True)
+    resultados.sort(key=lambda x: _STATUS_SEVERITY.get(x.get("status", ""), 0), reverse=True)
+    return resultados
+
+
+def get_crew_map_data() -> List[Dict]:
+    """
+    Agrega por estado (2 letras) para el mapa. Cada item:
+    state, count (proyectos activos), worst_status, projects (lista).
+    """
+    detalles = get_project_details()
+    por_estado: Dict[str, Dict] = {}
+    for d in detalles:
+        est = d.get("state", "")
+        if not est:
+            continue
+        e = por_estado.setdefault(
+            est, {"state": est, "count": 0, "worst": 0, "projects": []}
+        )
+        e["count"] += 1
+        e["projects"].append(d.get("project", ""))
+        sev = _STATUS_SEVERITY.get(d.get("status", ""), 0)
+        if sev > e["worst"]:
+            e["worst"] = sev
+
+    salida = []
+    for e in por_estado.values():
+        salida.append({
+            "state": e["state"],
+            "count": e["count"],
+            "worst_status": _SEVERITY_LABEL.get(e["worst"], "—"),
+            "projects": ", ".join(p for p in e["projects"] if p),
+        })
+    return salida

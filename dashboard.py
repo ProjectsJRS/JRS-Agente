@@ -6,13 +6,20 @@
 import os
 
 import pandas as pd
+import plotly.express as px
 import streamlit as st
 import yaml
 from yaml.loader import SafeLoader
 import streamlit_authenticator as stauth
 from datetime import datetime
 
-from dashboard_data import get_agent_status, get_active_projects, get_recent_alerts
+from dashboard_data import (
+    get_agent_status,
+    get_active_projects,
+    get_recent_alerts,
+    get_project_details,
+    get_crew_map_data,
+)
 
 st.set_page_config(
     page_title="JRS Operations Dashboard",
@@ -111,7 +118,62 @@ else:
 
 st.divider()
 
-# ----- Secciones pendientes (placeholders visibles) -----
+# ----- PROJECT DETAIL (expandible por proyecto, desde crews_json) -----
+st.subheader("🔎 Project Detail")
+st.caption("Detalle por crew · despliega cada proyecto para ver más")
+
+_detalles = get_project_details()
+if _detalles:
+    _dot_status = {"DELAYED": "🔴", "ATTENTION": "🟡", "ON TRACK": "🟢"}
+    for _d in _detalles:
+        _icono = _dot_status.get(_d.get("status", ""), "⚪")
+        _titulo = f'{_icono} {_d.get("project", "")} — {_d.get("location", "")}'
+        with st.expander(_titulo):
+            st.markdown(f"**Crew / Leader:** {_d.get('crew', '') or '—'}")
+            st.markdown(f"**Members:** {_d.get('members', '') or '—'}")
+            _dias = _d.get("days_on_site", "") or "—"
+            st.markdown(
+                f"**Status:** {_d.get('status', '') or '—'}  ·  "
+                f"**Days on site:** {_dias}"
+            )
+            st.markdown(f"**Progress:** {_d.get('progress', '') or '—'}")
+            st.markdown(f"**Incidents:** {_d.get('incidents', '') or 'none'}")
+            st.caption(f"Last update: {_d.get('last_update', '')}")
+else:
+    st.info("Sin detalle por crew todavía. Llega con los próximos crew updates.")
+
+st.divider()
+
+# ----- CREW MAP BY STATE (por riesgo) -----
+st.subheader("🗺️ Crew Map by State")
+st.caption("Color por riesgo: peor estado de cada estado (rojo/amarillo/verde)")
+
+_map = get_crew_map_data()
+if _map:
+    _df_map = pd.DataFrame(_map)
+    _fig_risk = px.choropleth(
+        _df_map,
+        locations="state",
+        locationmode="USA-states",
+        scope="usa",
+        color="worst_status",
+        category_orders={"worst_status": ["DELAYED", "ATTENTION", "ON TRACK", "—"]},
+        color_discrete_map={
+            "DELAYED": "#E24B4A",
+            "ATTENTION": "#BA7517",
+            "ON TRACK": "#1D9E75",
+            "—": "#cccccc",
+        },
+        labels={"worst_status": "Status"},
+        hover_data=["count", "projects"],
+    )
+    _fig_risk.update_layout(margin=dict(l=0, r=0, t=0, b=0), height=420)
+    st.plotly_chart(_fig_risk, width='stretch')
+else:
+    st.info("Sin datos de ubicación todavía. Llegan con los próximos crew updates.")
+
+st.divider()
+
 # ----- ACTIVE ALERTS (datos reales) -----
 st.subheader("⚠️ Active Alerts (Last 24h)")
 

@@ -126,3 +126,4 @@ zipp==4.1.0
 pandas==3.0.3
 streamlit==1.58.0
 streamlit-authenticator==0.4.2
+plotly==5.24.1

@@ -1005,10 +1005,21 @@ def procesar_un_correo(correo: dict) -> dict:
         if report_text:
             # Proyectos limpios del cuerpo del crew update; si no se hallan,
             # caemos al valor del modelo para no perder informacion.
+            cuerpo = correo.get("body", "")
             proyectos_limpios = (
-                extraer_proyectos_de_cuerpo(correo.get("body", ""))
+                extraer_proyectos_de_cuerpo(cuerpo)
                 or report_params.get("project", "")
             )
+            # Detalle por crew (para el detalle por proyecto y el mapa).
+            crews = extraer_crews_de_cuerpo(cuerpo)
+            estados = []
+            for c in crews:
+                if c.get("state") and c["state"] not in estados:
+                    estados.append(c["state"])
+            extra = {
+                "crews_json": json.dumps(crews, ensure_ascii=False),
+                "states": ", ".join(estados),
+            }
             guardar_en_historia(
                 report_text=report_text,
                 doc_type="crew_update",
@@ -1017,6 +1028,7 @@ def procesar_un_correo(correo: dict) -> dict:
                 clients=report_params.get("client", ""),
                 projects=proyectos_limpios,
                 source_email_id=email_id,
+                extra_metadata=extra,
             )
         else:
             logger.warning(
@@ -1156,6 +1168,60 @@ def extraer_proyectos_de_cuerpo(cuerpo: str) -> str:
         if codigo and codigo not in proyectos:
             proyectos.append(codigo)
     return ", ".join(proyectos)
+
+
+# =====================================================
+# Extraer el DETALLE POR CREW del cuerpo de un crew update.
+# El cuerpo trae bloques con formato fijo:
+#   === CREW 1 ===
+#   Crew / Leader:   Crew 7 / Martinez
+#   Project:         CVS #4471 — Dallas, TX
+#   Status:          ATTENTION
+#   Days on site:    6
+#   Progress:        Drywall 80% complete
+#   Incidents:       none
+# Devuelve una lista de dicts (uno por crew). Alimenta el detalle por
+# proyecto y el mapa (via el campo 'state'). Robusto: si un campo falta,
+# queda como cadena vacia; si el formato no calza, devuelve lista vacia.
+# =====================================================
+_CREW_BLOCK = re.compile(
+    r"===\s*CREW\s+\d+\s*===(.*?)(?====\s*CREW\s+\d+\s*===|===\s*PUNCH|===\s*END|\Z)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _campo_crew(bloque: str, etiqueta: str) -> str:
+    m = re.search(rf"(?im)^\s*{re.escape(etiqueta)}\s*:\s*(.+?)\s*$", bloque)
+    return m.group(1).strip() if m else ""
+
+
+def extraer_crews_de_cuerpo(cuerpo: str) -> list:
+    if not cuerpo:
+        return []
+    crews = []
+    for bloque in _CREW_BLOCK.findall(cuerpo):
+        proyecto_raw = _campo_crew(bloque, "Project")
+        partes = re.split(r"\s+[—–-]\s+", proyecto_raw, maxsplit=1)
+        codigo = partes[0].strip() if partes and partes[0] else ""
+        ubicacion = partes[1].strip() if len(partes) > 1 else ""
+        estado = ""
+        m_estado = re.search(r",\s*([A-Z]{2})\b", ubicacion)
+        if m_estado:
+            estado = m_estado.group(1)
+        if not codigo:
+            continue  # sin proyecto no es un crew util
+        crews.append({
+            "project": codigo,
+            "location": ubicacion,
+            "state": estado,
+            "crew": _campo_crew(bloque, "Crew / Leader") or _campo_crew(bloque, "Crew"),
+            "members": _campo_crew(bloque, "Members"),
+            "status": _campo_crew(bloque, "Status").upper(),
+            "days_on_site": _campo_crew(bloque, "Days on site"),
+            "progress": _campo_crew(bloque, "Progress"),
+            "incidents": _campo_crew(bloque, "Incidents"),
+        })
+    return crews
 
 
 # =====================================================

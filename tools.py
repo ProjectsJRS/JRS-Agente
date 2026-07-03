@@ -1438,6 +1438,7 @@ def guardar_en_historia(
     clients: str = "",
     projects: str = "",
     source_email_id: str = "",
+    extra_metadata: Optional[dict] = None,
 ) -> dict:
     if not report_text or not report_text.strip():
         return {"saved": False, "reason": "report_text vacio"}
@@ -1460,6 +1461,13 @@ def guardar_en_historia(
         "email_id": source_email_id or "",
         "ingested_at": datetime.now().isoformat(timespec="seconds"),
     }
+
+    # Campos extra (ej. crews_json, states). Solo mezclamos escalares, para
+    # respetar la restriccion de ChromaDB. Retrocompatible: si no se pasa, no cambia nada.
+    if extra_metadata:
+        for k, v in extra_metadata.items():
+            if isinstance(v, (str, int, float, bool)):
+                metadata[k] = v
 
     try:
         coleccion = _chroma_cliente.get_or_create_collection(name=COLECCION_HISTORIA)
