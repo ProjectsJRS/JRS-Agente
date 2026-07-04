@@ -68,7 +68,7 @@ MODELO = os.getenv("AGENT_MODEL", "claude-opus-4-8")
 # Sube este número CADA vez que despliegas. En los logs de Railway debe
 # aparecer en cada arranque y cada ciclo. Si no ves este valor, Railway está
 # corriendo una imagen CACHEADA (código viejo) — redeploy limpio.
-BUILD_VERSION = "2026-07-04_operations-db"
+BUILD_VERSION = "2026-07-04_status-alineado"
 
 SLEEP_BETWEEN_CYCLES_SECONDS = int(os.getenv("SLEEP_BETWEEN_CYCLES_SECONDS", "300"))
 MAX_EMAILS_PER_CYCLE = int(os.getenv("MAX_EMAILS_PER_CYCLE", "10"))
@@ -1255,19 +1255,27 @@ def extraer_crews_de_cuerpo(cuerpo: str) -> list:
 # hace guardar_en_historia). Todo lo que guarda es EXTRAIDO del cuerpo, no
 # inventado. Falla en silencio por crew: un error aqui nunca tumba el correo.
 # =====================================================
-_KW_COMPLETADO = (
-    "complete", "completed", "final walk", "turned over", "turnover",
-    "punch list approved", "closeout", "close-out", "close out",
+# Palabras de finalizacion en el campo Status. ALINEADO 1:1 con el dashboard
+# (_COMPLETED_STATUSES en dashboard_data.py) para que operations.db y el
+# dashboard coincidan SIEMPRE. Se busca por token: "ON TRACK — COMPLETED"
+# cuenta como completado; "ON TRACK" a secas NO.
+_COMPLETED_TOKENS = {"COMPLETED", "COMPLETE", "DONE", "FINISHED", "CLOSED"}
+
+# Palabras en Incidents que marcan severidad CRITICAL (trazabilidad para
+# consultas tipo "incidentes criticos del mes"). El escalamiento inmediato a
+# Richard lo sigue decidiendo el modelo; esto solo es una etiqueta estructurada.
+_INCIDENT_CRITICAL = (
+    "injury", "injured", "hurt", "hospital", "ambulance", "emergency",
+    "fire", "electrocut", "collapse",
 )
 
 
-def _status_proyecto_desde_progress(progress: str, incidents: str) -> str:
-    """Deriva el estatus del PROYECTO (no del crew) a partir del texto de avance.
-    Conservador: solo marca 'completed' con senales claras; si no, 'in_progress'."""
-    texto = f"{progress} {incidents}".lower()
-    if any(kw in texto for kw in _KW_COMPLETADO):
-        return "completed"
-    return "in_progress"
+def _status_proyecto_desde_status(crew_status: str) -> str:
+    """Deriva el estatus del PROYECTO desde el campo Status del crew, con la
+    MISMA logica que el dashboard (_es_completado). 'ON TRACK' o vacio NO
+    cuentan como completado; 'ON TRACK — COMPLETED' si."""
+    tokens = set(re.findall(r"[A-Z]+", (crew_status or "").upper()))
+    return "completed" if tokens & _COMPLETED_TOKENS else "in_progress"
 
 
 def persistir_crews_en_operations(crews: list, email_id: str, fecha: str,
@@ -1295,7 +1303,8 @@ def persistir_crews_en_operations(crews: list, email_id: str, fecha: str,
 
             progress = (c.get("progress") or "").strip()
             incidents = (c.get("incidents") or "").strip()
-            status_proyecto = _status_proyecto_desde_progress(progress, incidents)
+            crew_status = (c.get("status") or "").strip().upper()
+            status_proyecto = _status_proyecto_desde_status(crew_status)
 
             crew_leader_raw = (c.get("crew") or "").strip()
             crew_leader = (
@@ -1305,8 +1314,12 @@ def persistir_crews_en_operations(crews: list, email_id: str, fecha: str,
             members_raw = (c.get("members") or "").strip()
             team_members = [m.strip() for m in re.split(r"[,;/]", members_raw) if m.strip()]
 
-            crew_status = (c.get("status") or "").strip().upper()
-            severity = "CRITICAL" if crew_status == "CRITICAL" else None
+            incidents_l = incidents.lower()
+            severity = (
+                "CRITICAL"
+                if any(k in incidents_l for k in _INCIDENT_CRITICAL)
+                else None
+            )
 
             actividades = [progress] if progress else []
             if incidents and incidents.lower() not in ("none", "n/a", ""):
