@@ -42,6 +42,10 @@ from tools import (
 )
 from client_protocols import get_protocol
 from metrics import registrar_metrica
+# NUEVO (Paso 2): almacen estructurado de eventos operativos (operations.db).
+# Aditivo: no altera el flujo existente. Aporta la capa consultable por
+# proyecto/dia que faltaba para responder "actividades del dia X del proyecto Y".
+from operations_db import init_operations_db, OperationalEvent, upsert_event
 
 load_dotenv()  # En local lee .env. En Railway no hay .env: lee las env vars del panel.
 
@@ -64,7 +68,7 @@ MODELO = os.getenv("AGENT_MODEL", "claude-opus-4-8")
 # Sube este número CADA vez que despliegas. En los logs de Railway debe
 # aparecer en cada arranque y cada ciclo. Si no ves este valor, Railway está
 # corriendo una imagen CACHEADA (código viejo) — redeploy limpio.
-BUILD_VERSION = "2026-07-03_completed-and-spoofing"
+BUILD_VERSION = "2026-07-04_operations-db"
 
 SLEEP_BETWEEN_CYCLES_SECONDS = int(os.getenv("SLEEP_BETWEEN_CYCLES_SECONDS", "300"))
 MAX_EMAILS_PER_CYCLE = int(os.getenv("MAX_EMAILS_PER_CYCLE", "10"))
@@ -1031,6 +1035,23 @@ def procesar_un_correo(correo: dict) -> dict:
                 source_email_id=email_id,
                 extra_metadata=extra,
             )
+            # NUEVO (Paso 2): ademas de la historia semantica (arriba),
+            # guardamos cada crew como evento ESTRUCTURADO en operations.db.
+            # Aislado en try/except: nunca tumba el procesamiento del correo.
+            try:
+                n_ev = persistir_crews_en_operations(
+                    crews=crews,
+                    email_id=email_id,
+                    fecha=datetime.now().strftime("%Y-%m-%d"),
+                    report_params=report_params,
+                )
+                logger.info(
+                    f"[operations.db] {email_id}: {n_ev} evento(s) de crew guardados."
+                )
+            except Exception as e:
+                logger.warning(
+                    f"[operations.db] {email_id}: fallo al persistir crews: {e}"
+                )
         else:
             logger.warning(
                 f"[crew_update] {email_id}: no se capturo el reporte; "
@@ -1227,6 +1248,113 @@ def extraer_crews_de_cuerpo(cuerpo: str) -> list:
 
 
 # =====================================================
+# NUEVO (Paso 2) — Persistir cada crew de un crew update como evento
+# ESTRUCTURADO en operations.db (la capa consultable por proyecto/dia).
+# Reutiliza los crews ya parseados por extraer_crews_de_cuerpo(); no vuelve
+# a leer el correo ni toca ChromaDB (la copia semantica del reporte ya la
+# hace guardar_en_historia). Todo lo que guarda es EXTRAIDO del cuerpo, no
+# inventado. Falla en silencio por crew: un error aqui nunca tumba el correo.
+# =====================================================
+_KW_COMPLETADO = (
+    "complete", "completed", "final walk", "turned over", "turnover",
+    "punch list approved", "closeout", "close-out", "close out",
+)
+
+
+def _status_proyecto_desde_progress(progress: str, incidents: str) -> str:
+    """Deriva el estatus del PROYECTO (no del crew) a partir del texto de avance.
+    Conservador: solo marca 'completed' con senales claras; si no, 'in_progress'."""
+    texto = f"{progress} {incidents}".lower()
+    if any(kw in texto for kw in _KW_COMPLETADO):
+        return "completed"
+    return "in_progress"
+
+
+def persistir_crews_en_operations(crews: list, email_id: str, fecha: str,
+                                  report_params: dict) -> int:
+    """Guarda un OperationalEvent por crew. Devuelve cuantos se guardaron.
+    source_id = '<email_id>#crew<i>' => UID determinista y unico por crew;
+    reprocesar el mismo correo hace upsert (no duplica)."""
+    guardados = 0
+    for i, c in enumerate(crews):
+        try:
+            codigo = (c.get("project") or "").strip()
+            if not codigo:
+                continue
+            ubicacion = (c.get("location") or "").strip()
+            project_name = f"{codigo} — {ubicacion}" if ubicacion else codigo
+
+            # Cliente y numero de tienda EXTRAIDOS del codigo (p.ej. "CVS #4471"
+            # -> client "CVS", store_number "4471"). Nada se inventa.
+            cliente = re.split(r"[#\d]", codigo, maxsplit=1)[0].strip() or None
+            m_store = re.search(r"#\s*([A-Za-z0-9\-]+)", codigo)
+            store_number = m_store.group(1) if m_store else None
+
+            city = ubicacion.split(",")[0].strip() if ubicacion else None
+            state = (c.get("state") or "").strip() or None
+
+            progress = (c.get("progress") or "").strip()
+            incidents = (c.get("incidents") or "").strip()
+            status_proyecto = _status_proyecto_desde_progress(progress, incidents)
+
+            crew_leader_raw = (c.get("crew") or "").strip()
+            crew_leader = (
+                crew_leader_raw.split("/")[-1].strip()
+                if "/" in crew_leader_raw else None
+            )
+            members_raw = (c.get("members") or "").strip()
+            team_members = [m.strip() for m in re.split(r"[,;/]", members_raw) if m.strip()]
+
+            crew_status = (c.get("status") or "").strip().upper()
+            severity = "CRITICAL" if crew_status == "CRITICAL" else None
+
+            actividades = [progress] if progress else []
+            if incidents and incidents.lower() not in ("none", "n/a", ""):
+                actividades.append(f"Incident: {incidents}")
+
+            resumen_partes = [p for p in (crew_status, progress) if p]
+            summary = " — ".join(resumen_partes) if resumen_partes else None
+
+            evento = OperationalEvent(
+                event_type="crew_update",
+                source_id=f"{email_id}#crew{i}",
+                project_name=project_name,
+                client=cliente,
+                store_number=store_number,
+                city=city,
+                state=state,
+                status=status_proyecto,
+                event_date=fecha,
+                summary=summary,
+                activities=actividades,
+                team_members=team_members,
+                crew_leader=crew_leader,
+                severity=severity,
+                raw_text=(
+                    f"Crew/Leader: {crew_leader_raw}\n"
+                    f"Project: {codigo} — {ubicacion}\n"
+                    f"Status: {crew_status}\n"
+                    f"Days on site: {c.get('days_on_site','')}\n"
+                    f"Progress: {progress}\n"
+                    f"Incidents: {incidents}"
+                ),
+                metadata={
+                    "crew_status": crew_status,
+                    "days_on_site": c.get("days_on_site", ""),
+                    "progress": progress,
+                    "incidents": incidents,
+                    "risk_level": report_params.get("risk_level", ""),
+                    "source_email_id": email_id,
+                },
+            )
+            upsert_event(evento)
+            guardados += 1
+        except Exception as e:
+            logger.warning(f"[operations.db] crew {i} de {email_id} no persistido: {e}")
+    return guardados
+
+
+# =====================================================
 # HEARTBEAT — señal de vida para el dashboard
 # Escribe la hora actual en heartbeat.txt en cada ciclo. El dashboard
 # lo lee: si el ultimo latido fue hace <10 min, el agente esta vivo.
@@ -1255,6 +1383,10 @@ async def main():
 
     # Asegurar que el ChromaDB este disponible antes de empezar a procesar.
     asegurar_chromadb()
+
+    # NUEVO (Paso 2): crear operations.db si no existe (idempotente).
+    init_operations_db()
+    logger.info("operations.db listo (almacen estructurado de eventos operativos).")
 
     consecutive_failures = 0
 

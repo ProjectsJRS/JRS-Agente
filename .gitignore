@@ -42,3 +42,7 @@ alerts.jsonl
 archivados.json
 
 metrics.jsonl
+
+operations.db
+operations.db-wal
+operations.db-shm
