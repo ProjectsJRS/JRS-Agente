@@ -68,7 +68,7 @@ MODELO = os.getenv("AGENT_MODEL", "claude-opus-4-8")
 # Sube este número CADA vez que despliegas. En los logs de Railway debe
 # aparecer en cada arranque y cada ciclo. Si no ves este valor, Railway está
 # corriendo una imagen CACHEADA (código viejo) — redeploy limpio.
-BUILD_VERSION = "2026-07-04_status-alineado"
+BUILD_VERSION = "2026-07-24_reply-all-to-cc"
 
 SLEEP_BETWEEN_CYCLES_SECONDS = int(os.getenv("SLEEP_BETWEEN_CYCLES_SECONDS", "300"))
 MAX_EMAILS_PER_CYCLE = int(os.getenv("MAX_EMAILS_PER_CYCLE", "10"))
@@ -877,8 +877,16 @@ def procesar_un_correo(correo: dict) -> dict:
         )
 
     # CC autorizados (solo whitelist) para copiar en la respuesta a Richard.
-    # Determinístico: el código filtra, Claude no decide destinatarios.
-    cc_autorizados = filtrar_cc_whitelist(correo.get('cc', ''))
+    # Se leen los DOS campos del correo original: To + Cc. Antes solo se leía
+    # Cc, por eso cuando Richard ponía a Ralph, Macayla y Emmanuel en el campo
+    # PARA (To), la respuesta salía únicamente para él.
+    # Determinístico: el código filtra contra la whitelist (filtrar_cc_whitelist
+    # descarta externos, projects@ y las dos direcciones de Richard, que ya es
+    # el destinatario principal). Claude no decide destinatarios.
+    destinatarios_del_hilo = ", ".join(
+        campo for campo in (correo.get('to', ''), correo.get('cc', '')) if campo
+    )
+    cc_autorizados = filtrar_cc_whitelist(destinatarios_del_hilo)
     if cc_autorizados:
         logger.info(f"  CC autorizados (whitelist): {cc_autorizados}")
 
