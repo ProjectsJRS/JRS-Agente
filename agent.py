@@ -72,7 +72,7 @@ MODELO = os.getenv("AGENT_MODEL", "claude-opus-4-8")
 # Sube este número CADA vez que despliegas. En los logs de Railway debe
 # aparecer en cada arranque y cada ciclo. Si no ves este valor, Railway está
 # corriendo una imagen CACHEADA (código viejo) — redeploy limpio.
-BUILD_VERSION = "2026-09-30_whitelist-orlando"
+BUILD_VERSION = "2026-09-30_cc-richard-fix"
 
 SLEEP_BETWEEN_CYCLES_SECONDS = int(os.getenv("SLEEP_BETWEEN_CYCLES_SECONDS", "300"))
 MAX_EMAILS_PER_CYCLE = int(os.getenv("MAX_EMAILS_PER_CYCLE", "10"))
@@ -583,15 +583,32 @@ READ_EMAIL_TOOL_DEF = {
 # Excluye tambien la cuenta del agente (projects@) y al propio Richard
 # (que ya es el destinatario principal 'to').
 # =====================================================
-def filtrar_cc_whitelist(cc_raw: str) -> list:
+def filtrar_cc_whitelist(cc_raw: str, remitente_raw: str = "") -> list:
+    """Devuelve los internos (whitelist) del To/Cc a copiar en la respuesta.
+
+    CORRECCION 2026-09-30: antes se excluia SIEMPRE a Richard, porque esta
+    funcion nacio para responderle A Richard (él ya era el destinatario
+    principal). Cuando el remitente era otro interno (ej. Orlando) y Richard
+    venia copiado, Joe lo sacaba de la respuesta. Ahora se excluye al
+    REMITENTE (que ya es el destinatario principal), no a Richard fijo.
+    Si el remitente es Richard, se excluyen sus DOS direcciones (misma persona).
+    Tambien se deduplica por persona: si Richard aparece con sus dos
+    correos, se copia solo una vez.
+    """
     if not cc_raw:
         return []
-    excluidos = {
-        "projects@jrsretailservices.com",
-        "richard@jrsretailservices.com",
-        "richardbodington2@gmail.com",
-    }
+    remitente = verify_sender(remitente_raw) if remitente_raw else {}
+    email_remitente = remitente.get("email", "") if remitente.get("is_internal") else ""
+    nombre_remitente = remitente.get("name", "") if email_remitente else ""
+
+    excluidos = {"projects@jrsretailservices.com"}
+    if email_remitente:
+        excluidos.add(email_remitente)
+
     autorizados = []
+    personas_ya_copiadas = set()
+    if nombre_remitente:
+        personas_ya_copiadas.add(nombre_remitente)  # ej. Richard y sus 2 correos
     # Los CC vienen separados por comas; cada uno puede ser 'Name <email>'.
     for parte in cc_raw.split(','):
         parte = parte.strip()
@@ -601,8 +618,14 @@ def filtrar_cc_whitelist(cc_raw: str) -> list:
         if not check.get("is_internal"):
             continue  # no esta en whitelist -> descartar (candado)
         email = check.get("email", "")
-        if email and email not in excluidos and email not in autorizados:
-            autorizados.append(email)
+        nombre = check.get("name", "")
+        if not email or email in excluidos or email in autorizados:
+            continue
+        if nombre and nombre in personas_ya_copiadas:
+            continue
+        autorizados.append(email)
+        if nombre:
+            personas_ya_copiadas.add(nombre)
     return autorizados
 
 
@@ -1013,7 +1036,7 @@ def procesar_un_correo(correo: dict) -> dict:
     destinatarios_del_hilo = ", ".join(
         campo for campo in (correo.get('to', ''), correo.get('cc', '')) if campo
     )
-    cc_autorizados = filtrar_cc_whitelist(destinatarios_del_hilo)
+    cc_autorizados = filtrar_cc_whitelist(destinatarios_del_hilo, sender_raw)
     if cc_autorizados:
         logger.info(f"  CC autorizados (whitelist): {cc_autorizados}")
 
