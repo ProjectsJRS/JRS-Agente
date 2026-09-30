@@ -919,6 +919,154 @@ def send_quote_to_richard(
 #     interno como texto listo para que él lo reenvíe.
 # Replica el relabel AI-Agent -> AI-Procesado y responde en el mismo hilo.
 # =====================================================
+# =====================================================
+# NUEVO (2026-09-30): CORREO HTML CON TABLAS REALES
+# El modelo entrega los DATOS de la tabla (headers + rows) y el CODIGO
+# decide el diseño. Asi el formato es siempre el mismo, se ve bien en
+# Gmail (estilos inline, que es lo que Gmail respeta) y el modelo nunca
+# dibuja tablas con guiones y barras.
+# Siempre se envia tambien una version en texto plano (multipart/alternative)
+# para clientes de correo que no muestran HTML.
+# =====================================================
+import html as _html
+
+_COLOR_PRIMARIO = "#1F3A5F"   # azul JRS para encabezados
+_COLOR_ZEBRA = "#F4F6F9"
+_COLOR_BORDE = "#D5DBE3"
+_VACIOS = {"", "-", "—", "n/a", "na", "not reported", "none", "no reportado"}
+_PATRON_TABLA = re.compile(r"\[\[\s*TABLE\s*(\d+)\s*\]\]", re.IGNORECASE)
+
+
+def _texto_a_html(texto: str) -> str:
+    """Texto plano -> HTML sencillo: parrafos, listas con '- ' o '• ',
+    y **negritas**. Todo escapado (el contenido nunca inyecta HTML)."""
+    bloques_html = []
+    for bloque in re.split(r"\n\s*\n", (texto or "").strip()):
+        lineas = [l.rstrip() for l in bloque.split("\n") if l.strip()]
+        if not lineas:
+            continue
+        es_item = lambda l: re.match(r"^\s*([-•*]|\d+[.)])\s+", l)
+        if all(es_item(l) for l in lineas[1:]) and len(lineas) > 1 and not es_item(lineas[0]):
+            # "Titulo:" seguido de viñetas
+            cab, items = lineas[0], lineas[1:]
+        elif all(es_item(l) for l in lineas):
+            cab, items = None, lineas
+        else:
+            cab, items = None, []
+        def fmt(t):
+            t = _html.escape(t)
+            return re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", t)
+        if items:
+            h = ""
+            if cab:
+                h += f'<p style="margin:14px 0 6px 0;"><strong>{fmt(cab)}</strong></p>'
+            h += '<ul style="margin:0 0 12px 0;padding-left:22px;">'
+            for it in items:
+                it = re.sub(r"^\s*([-•*]|\d+[.)])\s+", "", it)
+                h += f'<li style="margin:0 0 6px 0;">{fmt(it)}</li>'
+            h += "</ul>"
+            bloques_html.append(h)
+        else:
+            bloques_html.append(
+                '<p style="margin:0 0 12px 0;">' + "<br>".join(fmt(l) for l in lineas) + "</p>"
+            )
+    return "\n".join(bloques_html)
+
+
+def _tabla_a_html(tabla: dict) -> str:
+    headers = [str(h) for h in (tabla.get("headers") or [])]
+    rows = [[("" if c is None else str(c)) for c in fila] for fila in (tabla.get("rows") or [])]
+    titulo = (tabla.get("title") or "").strip()
+    ncols = max([len(headers)] + [len(r) for r in rows] + [1])
+
+    h = ""
+    if titulo:
+        h += (f'<p style="margin:18px 0 8px 0;font-size:15px;font-weight:bold;'
+              f'color:{_COLOR_PRIMARIO};">{_html.escape(titulo)}</p>')
+    h += (f'<table role="presentation" cellpadding="0" cellspacing="0" '
+          f'style="border-collapse:collapse;width:100%;max-width:760px;'
+          f'font-family:Arial,Helvetica,sans-serif;font-size:13px;'
+          f'border:1px solid {_COLOR_BORDE};margin:0 0 16px 0;">')
+    if headers:
+        h += "<tr>"
+        for i in range(ncols):
+            txt = headers[i] if i < len(headers) else ""
+            h += (f'<th align="left" style="background:{_COLOR_PRIMARIO};color:#FFFFFF;'
+                  f'padding:9px 12px;border:1px solid {_COLOR_PRIMARIO};'
+                  f'font-weight:bold;">{_html.escape(txt)}</th>')
+        h += "</tr>"
+    for n, fila in enumerate(rows):
+        fondo = _COLOR_ZEBRA if n % 2 else "#FFFFFF"
+        h += "<tr>"
+        for i in range(ncols):
+            txt = fila[i] if i < len(fila) else ""
+            base = (f"padding:9px 12px;border:1px solid {_COLOR_BORDE};"
+                    f"vertical-align:top;background:{fondo};")
+            if i == 0:
+                base += "font-weight:bold;color:#1B2733;width:22%;"
+            if txt.strip().lower() in _VACIOS:
+                base += "color:#9AA3AE;font-style:italic;"
+                txt = txt.strip() or "—"
+            celda = _html.escape(txt).replace("\n", "<br>")
+            h += f'<td style="{base}">{celda}</td>'
+        h += "</tr>"
+    h += "</table>"
+    return h
+
+
+def _tabla_a_texto(tabla: dict) -> str:
+    """Version texto plano, SIN dibujos ASCII: una fila = un bloque legible."""
+    headers = [str(x) for x in (tabla.get("headers") or [])]
+    out = []
+    if tabla.get("title"):
+        out.append(str(tabla["title"]).upper())
+    for fila in tabla.get("rows") or []:
+        fila = [("" if c is None else str(c)) for c in fila]
+        if not fila:
+            continue
+        out.append(f"* {fila[0]}")
+        for i, val in enumerate(fila[1:], start=1):
+            etiqueta = headers[i] if i < len(headers) else f"Col {i+1}"
+            out.append(f"    {etiqueta}: {val or '—'}")
+    return "\n".join(out)
+
+
+def construir_cuerpos_correo(body: str, tables: list = None):
+    """Devuelve (texto_plano, html). Las tablas se insertan donde el cuerpo
+    tenga [[TABLE 1]], [[TABLE 2]]...; las no referenciadas van al final."""
+    tables = [t for t in (tables or []) if isinstance(t, dict)]
+    body = body or ""
+    usados = set()
+    partes_txt, partes_html = [], []
+    pos = 0
+    for m in _PATRON_TABLA.finditer(body):
+        idx = int(m.group(1)) - 1
+        trozo = body[pos:m.start()]
+        partes_txt.append(trozo)
+        partes_html.append(_texto_a_html(trozo))
+        if 0 <= idx < len(tables):
+            usados.add(idx)
+            partes_txt.append("\n" + _tabla_a_texto(tables[idx]) + "\n")
+            partes_html.append(_tabla_a_html(tables[idx]))
+        pos = m.end()
+    resto = body[pos:]
+    partes_txt.append(resto)
+    partes_html.append(_texto_a_html(resto))
+    for i, t in enumerate(tables):
+        if i not in usados:
+            partes_txt.append("\n\n" + _tabla_a_texto(t))
+            partes_html.append(_tabla_a_html(t))
+
+    texto = re.sub(r"\n{3,}", "\n\n", "".join(partes_txt)).strip()
+    texto = re.sub(r"\*\*(.+?)\*\*", r"\1", texto)  # sin asteriscos en texto plano
+    html_doc = (
+        '<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;'
+        'line-height:1.5;color:#1B2733;max-width:780px;">'
+        + "\n".join(p for p in partes_html if p) + "</div>"
+    )
+    return texto, html_doc
+
+
 def send_internal_reply(
     original_email_id: str,
     subject: str,
@@ -926,6 +1074,7 @@ def send_internal_reply(
     recipient: str,
     cc_emails: list = None,
     attachments: list = None,
+    tables: list = None,
 ) -> dict:
     cc_emails = cc_emails or []
     attachments = attachments or []
@@ -1016,15 +1165,21 @@ def send_internal_reply(
                 except Exception as e:
                     logger.error(f"[send_internal_reply] adjunto falló: {e}")
 
-        # Construir el correo. Con adjuntos -> multipart; sin adjuntos ->
-        # texto simple (comportamiento idéntico al anterior).
+        # Construir el correo. NUEVO: siempre texto plano + HTML
+        # (multipart/alternative). Gmail muestra el HTML con tablas reales;
+        # clientes sin HTML muestran el texto plano. Con adjuntos, el bloque
+        # alternative va dentro de un multipart/mixed.
+        texto_plano, html_body = construir_cuerpos_correo(body, tables)
+        alternativa = MIMEMultipart('alternative')
+        alternativa.attach(MIMEText(texto_plano, 'plain', 'utf-8'))
+        alternativa.attach(MIMEText(html_body, 'html', 'utf-8'))
         if partes_adjuntas:
-            mensaje = MIMEMultipart()
-            mensaje.attach(MIMEText(body or "", 'plain', 'utf-8'))
+            mensaje = MIMEMultipart('mixed')
+            mensaje.attach(alternativa)
             for adj in partes_adjuntas:
                 mensaje.attach(adj)
         else:
-            mensaje = MIMEText(body or "", 'plain', 'utf-8')
+            mensaje = alternativa
         mensaje['to'] = destinatario
         if cc_emails:
             mensaje['cc'] = ", ".join(cc_emails)

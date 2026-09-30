@@ -72,7 +72,7 @@ MODELO = os.getenv("AGENT_MODEL", "claude-opus-4-8")
 # Sube este número CADA vez que despliegas. En los logs de Railway debe
 # aparecer en cada arranque y cada ciclo. Si no ves este valor, Railway está
 # corriendo una imagen CACHEADA (código viejo) — redeploy limpio.
-BUILD_VERSION = "2026-09-30_inbox-search"
+BUILD_VERSION = "2026-09-30_html-tables"
 
 SLEEP_BETWEEN_CYCLES_SECONDS = int(os.getenv("SLEEP_BETWEEN_CYCLES_SECONDS", "300"))
 MAX_EMAILS_PER_CYCLE = int(os.getenv("MAX_EMAILS_PER_CYCLE", "10"))
@@ -424,7 +424,14 @@ SEND_INTERNAL_REPLY_TOOL_DEF = {
         "the table ONLY from data actually present in the sender's email or its "
         "attachments — organize and clean it, but do NOT invent stores, crews, dates, "
         "or any values. If the data needed for the file is not provided, do not "
-        "fabricate it: reply asking the sender for it."
+        "fabricate it: reply asking the sender for it. "
+        "TABLES IN THE EMAIL BODY: whenever your answer contains a comparison, "
+        "side-by-side, status list or any tabular data, NEVER draw it with dashes, "
+        "pipes or spaces in 'body'. Put the data in the 'tables' field instead and "
+        "write the placeholder [[TABLE 1]] (then [[TABLE 2]], ...) on its own line in "
+        "'body' exactly where each table should appear. The system renders a clean, "
+        "styled HTML table. Keep cell text short (one idea per cell). Use '- ' at the "
+        "start of a line for bullet points and **text** for bold."
     ),
     "input_schema": {
         "type": "object",
@@ -434,6 +441,27 @@ SEND_INTERNAL_REPLY_TOOL_DEF = {
             "body": {
                 "type": "string",
                 "description": "The full body of the reply to the internal sender",
+            },
+            "tables": {
+                "type": "array",
+                "description": (
+                    "Optional. Tables rendered INSIDE the email body as formatted "
+                    "HTML tables. Table N is placed where body contains [[TABLE N]]. "
+                    "First column = row label (e.g. Category). Use 'Not reported' "
+                    "for missing values (shown greyed out)."
+                ),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string", "description": "Optional title shown above the table"},
+                        "headers": {"type": "array", "items": {"type": "string"}},
+                        "rows": {
+                            "type": "array",
+                            "items": {"type": "array", "items": {"type": "string"}},
+                        },
+                    },
+                    "required": ["headers", "rows"],
+                },
             },
             "attachments": {
                 "type": "array",
@@ -710,6 +738,7 @@ def ejecutar_herramienta(nombre: str, parametros: dict, cc_autorizados: list = N
                 recipient=internal_recipient,
                 cc_emails=cc_autorizados or [],
                 attachments=parametros.get("attachments") or [],
+                tables=parametros.get("tables") or [],
             )
 
         elif nombre == "alert_if_critical":
