@@ -72,7 +72,7 @@ MODELO = os.getenv("AGENT_MODEL", "claude-opus-4-8")
 # Sube este número CADA vez que despliegas. En los logs de Railway debe
 # aparecer en cada arranque y cada ciclo. Si no ves este valor, Railway está
 # corriendo una imagen CACHEADA (código viejo) — redeploy limpio.
-BUILD_VERSION = "2026-09-30_html-tables"
+BUILD_VERSION = "2026-09-30_whitelist-orlando"
 
 SLEEP_BETWEEN_CYCLES_SECONDS = int(os.getenv("SLEEP_BETWEEN_CYCLES_SECONDS", "300"))
 MAX_EMAILS_PER_CYCLE = int(os.getenv("MAX_EMAILS_PER_CYCLE", "10"))
@@ -410,7 +410,7 @@ SEND_INTERNAL_REPLY_TOOL_DEF = {
     "name": "send_internal_reply",
     "description": (
         "Replies DIRECTLY (not a draft) to the internal JRS sender (Richard, "
-        "Ralph, Macayla, or Emmanuel) who wrote this email. Use this to answer any "
+        "Ralph, Macayla, Emmanuel, or Orlando) who wrote this email. Use this to answer any "
         "request from an internal sender — questions, summaries, scopes, schedules, "
         "logistics, recommendations, or ready-to-send text the sender will forward. "
         "The system emails your response to the sender automatically, in the same "
@@ -620,6 +620,7 @@ _ORDEN_RECONOCIMIENTO = {
     "Macayla Sommer": 1,
     "Richard Bodington": 2,
     "Emmanuel": 3,
+    "Orlando Vasquez": 4,
 }
 _AGENTE_EMAIL = "projects@jrsretailservices.com"
 
@@ -967,7 +968,7 @@ def procesar_un_correo(correo: dict) -> dict:
                  SEARCH_INBOX_TOOL_DEF, READ_EMAIL_TOOL_DEF]
             instruccion_rol = (
                 "This email is from an INTERNAL JRS decision-maker (Richard, Ralph, "
-                "Macayla, or Emmanuel). Do NOT leave a draft and do NOT wait for "
+                "Macayla, Emmanuel, or Orlando). Do NOT leave a draft and do NOT wait for "
                 "approval. Answer their request and reply DIRECTLY to them by calling "
                 "send_internal_reply, which emails your response to the sender "
                 "automatically, in the same thread. If the content is meant for an "

@@ -39,6 +39,16 @@ WHITELIST = {
         "can_approve_external": False,
         "tone": "professor-alumno, pedagógico",
     },
+    # Agregado 2026-09-30 a pedido de Emmanuel: mismo trato que el equipo
+    # interno (respuesta directa, lectura de bandeja). NO aprueba externos.
+    "vasquezo@jrsretailservices.com": {
+        "name": "Orlando Vasquez",
+        "role": "JRS Team Member",
+        "can_approve_external": False,
+        "tone": "profesional y cordial, bilingüe",
+        # Variante con tilde, por si su display name en Gmail la trae.
+        "display_aliases": ["orlando vásquez"],
+    },
     "projects@jrsretailservices.com": {
         "name": "JRS Projects",
         "role": "Operations Hub",
