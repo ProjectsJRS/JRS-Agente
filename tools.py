@@ -24,6 +24,19 @@ from rag_query import buscar_codigo, _cliente as _chroma_cliente
 # asi lo que guardamos en historia es recuperable por las mismas queries.
 from codigos_referencia import es_codigo_de_referencia, consultar_referencia
 
+# NUEVO (2026-10-01) Etapa 2: codigos de proyecto de JRS Operations System.
+# Import defensivo: si codigos_proyecto.py faltara, Joe sigue funcionando
+# igual que antes y simplemente no etiqueta los reportes con codigo.
+try:
+    from codigos_proyecto import (
+        verificar_asunto as _verificar_codigo_asunto,
+        mensaje_aviso as _mensaje_aviso_codigo,
+        VALIDO as _CODIGO_VALIDO,
+    )
+    _CODIGOS_DISPONIBLES = True
+except Exception as _e_codigos:
+    _CODIGOS_DISPONIBLES = False
+
 load_dotenv()
 
 import logging
@@ -1594,6 +1607,7 @@ def guardar_en_historia(
     projects: str = "",
     source_email_id: str = "",
     extra_metadata: Optional[dict] = None,
+    subject: str = "",
 ) -> dict:
     if not report_text or not report_text.strip():
         return {"saved": False, "reason": "report_text vacio"}
@@ -1624,6 +1638,12 @@ def guardar_en_historia(
             if isinstance(v, (str, int, float, bool)):
                 metadata[k] = v
 
+    # NUEVO (Etapa 2): etiquetar el reporte con el codigo de JRS OPS.
+    # Retrocompatible: si no llega subject, el reporte se guarda igual que antes.
+    code_check = _verificar_codigo_para_historia(subject) if subject else None
+    if code_check:
+        metadata.update(code_check["metadata"])
+
     try:
         coleccion = _chroma_cliente.get_or_create_collection(name=COLECCION_HISTORIA)
         # upsert: si el mismo correo se reprocesara, sobrescribe en vez de duplicar.
@@ -1637,10 +1657,149 @@ def guardar_en_historia(
             f"[guardar_en_historia] guardado {doc_id} en {COLECCION_HISTORIA} "
             f"(total chunks: {total})"
         )
-        return {"saved": True, "doc_id": doc_id, "collection_count": total}
+        resultado = {"saved": True, "doc_id": doc_id, "collection_count": total}
+        if code_check:
+            resultado["code_check"] = {
+                "code_status": code_check["metadata"]["code_status"],
+                "project_code": code_check["metadata"]["project_code"],
+                "project_name": code_check["metadata"]["project_name"],
+                "aviso": code_check["aviso"],
+            }
+        return resultado
     except Exception as e:
         logger.error(f"[guardar_en_historia] error guardando {doc_id}: {e}")
         return {"saved": False, "doc_id": doc_id, "error": str(e)}
+
+
+# =====================================================
+# NUEVO (2026-10-01) ETAPA 2: CODIGOS DE PROYECTO (JRS OPS)
+# Decision 100% deterministica (codigos_proyecto.py). El modelo NO decide
+# si un codigo existe: solo recibe el resultado.
+# =====================================================
+JOE_CUENTA = os.getenv("JOE_EMAIL", "projects@jrsretailservices.com").lower()
+# Idioma del aviso de codigo: "en" (equipo de JRS) o "es".
+CODIGOS_IDIOMA_AVISO = os.getenv("CODIGOS_IDIOMA_AVISO", "en")
+# A quien avisar cuando el reporte lo envio la propia cuenta de Joe
+# (reenvios desde projects@). Si queda vacio, no se envia el aviso
+# (evita que Joe se responda a si mismo en bucle).
+CODIGOS_AVISO_DESTINO = os.getenv("CODIGOS_AVISO_DESTINO", "").strip()
+
+_ESTADOS_PROYECTO_ACTIVOS = {"ACTIVE", ""}
+
+
+def _aviso_proyecto_inactivo(codigo: str, nombre: str, status: str, idioma: str) -> str:
+    if idioma == "es":
+        return (f"He cargado el reporte con el codigo {codigo} ({nombre}), pero el proyecto "
+                f"figura como '{status}' en JRS Operations System, favor revisar.")
+    return (f"I have loaded the report with code {codigo} ({nombre}), but the project is "
+            f"marked as '{status}' in JRS Operations System. Please review.")
+
+
+def _verificar_codigo_para_historia(subject: str) -> Optional[dict]:
+    """Verifica el codigo del asunto y arma los metadatos escalares para Chroma.
+    Nunca lanza excepcion: un fallo aqui jamas impide guardar el reporte."""
+    if not _CODIGOS_DISPONIBLES:
+        return None
+    try:
+        ver = _verificar_codigo_asunto(subject)
+        proyecto = ver.get("proyecto") or {}
+        estado = ver.get("estado") or ""
+        metadata = {
+            "code_status": estado,                                   # VALIDO/HUERFANO/SIN_CODIGO/MULTIPLE/NO_VERIFICADO
+            "project_code": ver.get("codigo") or "",
+            "code_candidates": ",".join(ver.get("codigos") or []),
+            "project_id": proyecto.get("id") or "",                  # uuid de JRS OPS (no cambia si se renombra el codigo)
+            "project_name": proyecto.get("name") or "",
+            "project_status": proyecto.get("status") or "",
+            "code_suggestions": ",".join(ver.get("sugerencias") or []),
+            "code_checked_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        if estado == _CODIGO_VALIDO:
+            status_proy = (proyecto.get("status") or "").upper()
+            aviso = None
+            if status_proy not in _ESTADOS_PROYECTO_ACTIVOS:
+                aviso = _aviso_proyecto_inactivo(
+                    proyecto.get("code") or "", proyecto.get("name") or "",
+                    proyecto.get("status") or "", CODIGOS_IDIOMA_AVISO)
+        else:
+            aviso = _mensaje_aviso_codigo(ver, idioma=CODIGOS_IDIOMA_AVISO)
+        logger.info(f"[codigo_proyecto] {estado} {metadata['project_code']!r} <- {subject!r}")
+        return {"metadata": metadata, "aviso": aviso}
+    except Exception as e:
+        logger.warning(f"[codigo_proyecto] verificacion fallo, se guarda sin codigo: {e}")
+        return None
+
+
+def _asunto_sin_corchetes(asunto: str) -> str:
+    """Quita corchetes del asunto para que el aviso NUNCA parezca un
+    reporte diario si por error volviera a la bandeja de Joe."""
+    limpio = re.sub(r"[\[\]]", "", asunto or "")
+    limpio = re.sub(r"^\s*((re|fwd?|rv)\s*:\s*)+", "", limpio, flags=re.I)
+    return re.sub(r"\s+", " ", limpio).strip()[:120]
+
+
+def avisar_codigo_proyecto(original_email_id: str, subject: str,
+                           sender: str, code_check: Optional[dict]) -> dict:
+    """Envia el aviso de codigo (huerfano, sin codigo, multiple, no verificado
+    o proyecto inactivo) como CORREO NUEVO, solo al remitente interno.
+
+    CAMBIO (2026-10-01): ya NO responde en el hilo. Los reportes diarios son
+    correos AL CLIENTE donde Joe va en CCO; responder en ese hilo pondria el
+    aviso dentro de la conversacion con el cliente. El correo nuevo:
+      - va solo a un destinatario INTERNO (re-verificado con whitelist),
+      - no lleva threadId / In-Reply-To (conversacion separada),
+      - su asunto no lleva corchetes (Joe nunca lo confundira con un reporte).
+    """
+    aviso = (code_check or {}).get("aviso")
+    if not aviso:
+        return {"sent": False, "reason": "sin aviso"}
+
+    destinatario = (sender or "").strip()
+    if JOE_CUENTA and JOE_CUENTA in destinatario.lower():
+        # El reporte lo envio la propia cuenta de Joe: no responderse a si mismo.
+        if not CODIGOS_AVISO_DESTINO:
+            logger.warning(f"[avisar_codigo_proyecto] remitente es {JOE_CUENTA} y no hay "
+                           f"CODIGOS_AVISO_DESTINO; aviso no enviado: {aviso}")
+            return {"sent": False, "reason": "remitente propio sin destino alterno"}
+        destinatario = CODIGOS_AVISO_DESTINO
+
+    # CANDADO: solo destinatarios internos (misma whitelist que send_internal_reply).
+    try:
+        from whitelist import verify_sender
+        chk = verify_sender(destinatario)
+        if not chk.get("is_internal"):
+            logger.error(f"[avisar_codigo_proyecto] BLOQUEADO: {destinatario!r} no es interno.")
+            return {"sent": False, "error": "Destinatario no interno; bloqueado."}
+        destinatario = chk.get("email") or destinatario
+    except Exception as e:
+        logger.error(f"[avisar_codigo_proyecto] no se pudo verificar destinatario: {e}")
+        return {"sent": False, "error": f"Verificacion de destinatario fallo: {e}"}
+
+    codigo = (code_check or {}).get("project_code") or "no code"
+    referencia = _asunto_sin_corchetes(subject)
+    asunto_aviso = f"Joe - Project code check: {referencia or codigo}"
+
+    if CODIGOS_IDIOMA_AVISO == "es":
+        cuerpo = (f"{aviso}\n\nCorreo original: \"{subject}\"\n"
+                  f"Estado del codigo: {code_check.get('code_status')}\n\n"
+                  "Este aviso es solo para el equipo interno de JRS. — Joe")
+    else:
+        cuerpo = (f"{aviso}\n\nOriginal email: \"{subject}\"\n"
+                  f"Code status: {code_check.get('code_status')}\n\n"
+                  "This notice is for the internal JRS team only. — Joe")
+
+    try:
+        service = obtener_servicio_gmail()
+        mensaje = MIMEText(cuerpo, "plain", "utf-8")
+        mensaje["to"] = destinatario
+        mensaje["subject"] = asunto_aviso
+        raw = base64.urlsafe_b64encode(mensaje.as_bytes()).decode()
+        enviado = service.users().messages().send(userId="me", body={"raw": raw}).execute()
+        logger.info(f"[avisar_codigo_proyecto] -> {destinatario} (msg {enviado.get('id')}): {aviso}")
+        return {"sent": True, "to": destinatario, "message_id": enviado.get("id")}
+    except Exception as e:
+        logger.error(f"[avisar_codigo_proyecto] fallo el envio a {destinatario}: {e}")
+        return {"sent": False, "error": str(e)}
 
 
 # =====================================================
@@ -1855,3 +2014,106 @@ def read_email(message_id: str, include_attachments: bool = True,
     except Exception as e:
         logger.error(f"[read_email] {message_id}: {e}")
         return {"error": str(e)}
+
+
+# =====================================================
+# NUEVO (2026-10-01): NOTA AL EQUIPO (modo observador)
+# Cuando Joe esta en CC o CCO de un correo (reporte diario al cliente,
+# respuesta del cliente, discusion del hilo), SIEMPRE responde al EQUIPO
+# INTERNO con un correo NUEVO, separado del hilo del cliente.
+#
+# BLINDAJE (todo en codigo, el modelo no elige nada):
+#   - destinatarios = solo direcciones INTERNAS (whitelist) presentes en
+#     From/To/Cc; si no hay ninguna, JOE_EQUIPO_DESTINO.
+#   - correo nuevo: sin threadId ni In-Reply-To -> el cliente jamas lo ve.
+#   - asunto sin corchetes y fijo por proyecto ("Joe | <codigo> <nombre>"),
+#     asi Gmail agrupa las notas de Joe por proyecto en su propio hilo.
+# =====================================================
+from email.utils import getaddresses as _getaddresses
+
+JOE_EQUIPO_DESTINO = os.getenv("JOE_EQUIPO_DESTINO", "").strip()
+
+
+def destinatarios_internos(from_raw: str, to_raw: str, cc_raw: str) -> list:
+    """Direcciones INTERNAS (whitelist) del correo, sin la cuenta de Joe ni
+    duplicados. Si no hay ninguna, usa JOE_EQUIPO_DESTINO (coma-separado)."""
+    from whitelist import verify_sender
+    vistos, internos = set(), []
+    pares = _getaddresses([from_raw or "", to_raw or "", cc_raw or ""])
+    for nombre, direccion in pares:
+        direccion = (direccion or "").strip().lower()
+        if not direccion or direccion == JOE_CUENTA or direccion in vistos:
+            continue
+        vistos.add(direccion)
+        try:
+            chk = verify_sender(f"{nombre} <{direccion}>" if nombre else direccion)
+        except Exception:
+            continue
+        if chk.get("is_internal") and chk.get("spoofing_risk") != "high":
+            internos.append(chk.get("email") or direccion)
+    if not internos and JOE_EQUIPO_DESTINO:
+        for d in JOE_EQUIPO_DESTINO.split(","):
+            d = d.strip()
+            if d:
+                try:
+                    if verify_sender(d).get("is_internal"):
+                        internos.append(d)
+                except Exception:
+                    pass
+    # dedupe final conservando orden
+    unicos = []
+    for d in internos:
+        if d.lower() not in [u.lower() for u in unicos]:
+            unicos.append(d)
+    return unicos
+
+
+def _asunto_nota_equipo(subject: str, code_check: Optional[dict]) -> str:
+    referencia = _asunto_sin_corchetes(subject)
+    return f"Joe | {referencia}" if referencia else "Joe | Project update"
+
+
+def enviar_nota_equipo(subject: str, from_raw: str, to_raw: str, cc_raw: str,
+                       report_text: str = "", code_check: Optional[dict] = None,
+                       via: str = "") -> dict:
+    """Envia al equipo interno la nota de Joe sobre un correo observado
+    (CC/CCO). Incluye el aviso de codigo arriba, si lo hay."""
+    destinatarios = destinatarios_internos(from_raw, to_raw, cc_raw)
+    if not destinatarios:
+        logger.warning(f"[nota_equipo] sin destinatarios internos para {subject!r}; "
+                       "define JOE_EQUIPO_DESTINO. Nota no enviada.")
+        return {"sent": False, "reason": "sin destinatarios internos"}
+
+    aviso = (code_check or {}).get("aviso")
+    partes = []
+    if aviso:
+        partes.append(f"⚠ PROJECT CODE CHECK\n{aviso}")
+    if report_text and report_text.strip():
+        partes.append(report_text.strip())
+    else:
+        partes.append("I received this email and archived it, but I could not generate "
+                      "a summary. Please review the original message.")
+    remitente_original = _getaddresses([from_raw or ""])
+    remitente_txt = (remitente_original[0][0] or remitente_original[0][1]) if remitente_original else ""
+    partes.append(
+        f"---\nOriginal email: \"{subject}\"\nFrom: {remitente_txt}\n"
+        f"Joe was on {via or 'copy'} of this email. This note is for the internal "
+        f"JRS team only and was NOT sent to the client. — Joe"
+    )
+    cuerpo = "\n\n".join(partes)
+
+    try:
+        service = obtener_servicio_gmail()
+        mensaje = MIMEText(cuerpo, "plain", "utf-8")
+        mensaje["to"] = destinatarios[0]
+        if len(destinatarios) > 1:
+            mensaje["cc"] = ", ".join(destinatarios[1:])
+        mensaje["subject"] = _asunto_nota_equipo(subject, code_check)
+        raw = base64.urlsafe_b64encode(mensaje.as_bytes()).decode()
+        enviado = service.users().messages().send(userId="me", body={"raw": raw}).execute()
+        logger.info(f"[nota_equipo] -> {destinatarios} (msg {enviado.get('id')}) "
+                    f"via={via} code={((code_check or {}).get('code_status'))}")
+        return {"sent": True, "to": destinatarios, "message_id": enviado.get("id")}
+    except Exception as e:
+        logger.error(f"[nota_equipo] fallo el envio a {destinatarios}: {e}")
+        return {"sent": False, "error": str(e)}

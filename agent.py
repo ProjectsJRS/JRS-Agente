@@ -39,6 +39,10 @@ from tools import (
     cite_applicable_standard,
     guardar_en_historia,
     marcar_como_procesado,
+    # NUEVO (2026-10-01) Etapa 2: aviso de codigo de proyecto (JRS OPS)
+    JOE_CUENTA,
+    # NUEVO (2026-10-01): nota al equipo interno en modo observador (CC/CCO)
+    enviar_nota_equipo,
     # NUEVO (2026-09-30): busqueda/lectura de la bandeja (solo lectura)
     search_inbox,
     read_email,
@@ -72,7 +76,7 @@ MODELO = os.getenv("AGENT_MODEL", "claude-opus-4-8")
 # Sube este número CADA vez que despliegas. En los logs de Railway debe
 # aparecer en cada arranque y cada ciclo. Si no ves este valor, Railway está
 # corriendo una imagen CACHEADA (código viejo) — redeploy limpio.
-BUILD_VERSION = "2026-09-30_cc-richard-fix"
+BUILD_VERSION = "2026-10-01_modo-observador"
 
 SLEEP_BETWEEN_CYCLES_SECONDS = int(os.getenv("SLEEP_BETWEEN_CYCLES_SECONDS", "300"))
 MAX_EMAILS_PER_CYCLE = int(os.getenv("MAX_EMAILS_PER_CYCLE", "10"))
@@ -895,6 +899,26 @@ def leer_correos_pendientes(max_results: int = 10) -> list:
 
 
 # =====================================================
+# NUEVO (2026-10-01): MODO OBSERVADOR
+# Joe es OBSERVADOR cuando su direccion NO esta en "Para" (To):
+# llego en CC o en CCO. Tipico de los hilos de proyecto con el cliente
+# (reporte diario, respuestas del cliente, discusiones).
+# En modo observador Joe archiva y SIEMPRE manda una nota al equipo
+# interno, pero NUNCA responde en el hilo ni redacta al cliente.
+# =====================================================
+def joe_es_observador(to_raw: str) -> bool:
+    return JOE_CUENTA not in (to_raw or "").lower()
+
+
+def via_de_joe(to_raw: str, cc_raw: str) -> str:
+    if JOE_CUENTA in (to_raw or "").lower():
+        return "To"
+    if JOE_CUENTA in (cc_raw or "").lower():
+        return "CC"
+    return "BCC"
+
+
+# =====================================================
 # AGENT LOOP — un correo
 # =====================================================
 def procesar_un_correo(correo: dict) -> dict:
@@ -943,10 +967,20 @@ def procesar_un_correo(correo: dict) -> dict:
     # sigue disponible para que una lesion escale igual.
     # =====================================================
     asunto_norm = asunto.strip().lower()
-    es_crew_update = (
+    # Formato anterior (se mantiene por compatibilidad): asunto "[CREW UPDATE] ...".
+    es_crew_legacy = (
         asunto_norm.startswith("[crew update]")
         and sender_check["is_internal"]
     )
+    # NUEVO (2026-10-01): MODO OBSERVADOR (Joe en CC o CCO).
+    # Aplica a CUALQUIER remitente (equipo o cliente): reporte diario,
+    # respuesta del cliente, discusion del hilo. Regla deterministica:
+    # Joe no esta en "Para" => archiva + nota al equipo; nunca responde al hilo.
+    via_joe = via_de_joe(correo.get("to", ""), correo.get("cc", ""))
+    es_observador = joe_es_observador(correo.get("to", ""))
+    es_crew_update = es_crew_legacy or es_observador
+    if es_observador:
+        logger.info(f"[observador] {email_id}: Joe en {via_joe} -> archivar + nota al equipo.")
 
     if es_crew_update:
         tools_para_este_correo = [
@@ -963,7 +997,21 @@ def procesar_un_correo(correo: dict) -> dict:
             "immediate alert to Richard before continuing. "
             "Do NOT attempt to reply; this feed never gets a response and it "
             "will be closed automatically.\n\n"
-            f"EMAIL_ID: {email_id}\n\n"
+            + (
+                f"CONTEXT: You are an OBSERVER on this email (you were on {via_joe}). "
+                "It belongs to a project thread between JRS and the CLIENT: it may be "
+                "a daily report sent to the client, a client reply, or a discussion. "
+                "The subject carries the JRS Operations System project code in brackets. "
+                "It may not follow the crew update template. Your report will be "
+                "delivered AUTOMATICALLY to the internal JRS team only (never to the "
+                "client). Write it for the team: what was said and by whom, project "
+                "status and progress, decisions, open questions or requests that need "
+                "a JRS answer (include a suggested answer the team can use), risks, "
+                "and next steps. If someone asks Joe something directly, answer it in "
+                "the report. Never address the client.\n\n"
+                if es_observador else ""
+            )
+            + f"EMAIL_ID: {email_id}\n\n"
             f"{contexto_remitente}"
         )
     else:
@@ -1165,6 +1213,7 @@ def procesar_un_correo(correo: dict) -> dict:
     # POR CODIGO. Sin esto el correo se quedaria en AI-Agent y se reprocesaria
     # en cada ciclo (bucle infinito).
     if es_crew_update:
+        code_check = None
         if report_text:
             # Proyectos limpios del cuerpo del crew update; si no se hallan,
             # caemos al valor del modelo para no perder informacion.
@@ -1182,8 +1231,9 @@ def procesar_un_correo(correo: dict) -> dict:
             extra = {
                 "crews_json": json.dumps(crews, ensure_ascii=False),
                 "states": ", ".join(estados),
+                "via": via_joe,  # NUEVO: To / CC / BCC
             }
-            guardar_en_historia(
+            guardado = guardar_en_historia(
                 report_text=report_text,
                 doc_type="crew_update",
                 date=datetime.now().strftime("%Y-%m-%d"),
@@ -1192,7 +1242,9 @@ def procesar_un_correo(correo: dict) -> dict:
                 projects=proyectos_limpios,
                 source_email_id=email_id,
                 extra_metadata=extra,
+                subject=asunto,  # NUEVO (Etapa 2): verifica el codigo contra JRS OPS
             )
+            code_check = (guardado or {}).get("code_check")
             # NUEVO (Paso 2): ademas de la historia semantica (arriba),
             # guardamos cada crew como evento ESTRUCTURADO en operations.db.
             # Aislado en try/except: nunca tumba el procesamiento del correo.
@@ -1215,6 +1267,22 @@ def procesar_un_correo(correo: dict) -> dict:
                 f"[crew_update] {email_id}: no se capturo el reporte; "
                 "se cierra el correo sin guardar en historia."
             )
+        # NUEVO (2026-10-01): Joe SIEMPRE responde al equipo interno con una
+        # nota nueva (fuera del hilo del cliente). Destinatarios decididos por
+        # codigo (solo internos). Aislado: nunca impide cerrar el correo.
+        try:
+            nota = enviar_nota_equipo(
+                subject=asunto,
+                from_raw=sender_raw,
+                to_raw=correo.get("to", ""),
+                cc_raw=correo.get("cc", ""),
+                report_text=report_text or "",
+                code_check=code_check,
+                via=via_joe,
+            )
+            logger.info(f"[nota_equipo] {email_id}: {nota}")
+        except Exception as e:
+            logger.warning(f"[nota_equipo] {email_id}: fallo la nota: {e}")
         cierre = marcar_como_procesado(email_id)
         logger.info(f"[crew_update] {email_id}: cierre -> {cierre}")
 
