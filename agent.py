@@ -43,6 +43,9 @@ from tools import (
     JOE_CUENTA,
     # NUEVO (2026-10-01): nota al equipo interno en modo observador (CC/CCO)
     enviar_nota_equipo,
+    # NUEVO (2026-10-01): politica "Joe solo en CCO" con clientes
+    analizar_visibilidad,
+    texto_alerta_exposicion,
     # NUEVO (2026-09-30): busqueda/lectura de la bandeja (solo lectura)
     search_inbox,
     read_email,
@@ -76,7 +79,7 @@ MODELO = os.getenv("AGENT_MODEL", "claude-opus-4-8")
 # Sube este número CADA vez que despliegas. En los logs de Railway debe
 # aparecer en cada arranque y cada ciclo. Si no ves este valor, Railway está
 # corriendo una imagen CACHEADA (código viejo) — redeploy limpio.
-BUILD_VERSION = "2026-10-01_nota-equipo-html"
+BUILD_VERSION = "2026-10-01_alerta-visibilidad"
 
 SLEEP_BETWEEN_CYCLES_SECONDS = int(os.getenv("SLEEP_BETWEEN_CYCLES_SECONDS", "300"))
 MAX_EMAILS_PER_CYCLE = int(os.getenv("MAX_EMAILS_PER_CYCLE", "10"))
@@ -1032,7 +1035,21 @@ def procesar_un_correo(correo: dict) -> dict:
     # respuesta del cliente, discusion del hilo. Regla deterministica:
     # Joe no esta en "Para" => archiva + nota al equipo; nunca responde al hilo.
     via_joe = via_de_joe(correo.get("to", ""), correo.get("cc", ""))
-    es_observador = joe_es_observador(correo.get("to", ""))
+    # NUEVO (2026-10-01): POLITICA "JOE SOLO EN CCO" CON CLIENTES.
+    # Si Joe aparece VISIBLE (Para/CC) en un correo con clientes/externos,
+    # se fuerza el modo observador (nunca responde en el hilo) y se genera
+    # una alerta para el equipo. Excepcion: externo escribiendo directo a
+    # projects@ (entrante normal) -> flujo de borrador de siempre.
+    alerta_exposicion = ""
+    try:
+        vis = analizar_visibilidad(sender_raw, correo.get("to", ""), correo.get("cc", ""))
+        if vis.get("exposicion"):
+            alerta_exposicion = texto_alerta_exposicion(vis.get("externos", []), via_joe)
+            logger.warning(f"[alerta_visibilidad] {email_id}: Joe visible en {via_joe} "
+                           f"con externos {vis.get('externos')}")
+    except Exception as e:
+        logger.warning(f"[alerta_visibilidad] {email_id}: no se pudo analizar: {e}")
+    es_observador = joe_es_observador(correo.get("to", "")) or bool(alerta_exposicion)
     es_crew_update = es_crew_legacy or es_observador
     if es_observador:
         logger.info(f"[observador] {email_id}: Joe en {via_joe} -> archivar + nota al equipo.")
@@ -1067,6 +1084,10 @@ def procesar_un_correo(correo: dict) -> dict:
                 "what was said and by whom, status and progress, decisions, open "
                 "questions or requests that need a JRS answer (with a suggested answer), "
                 "risks, next steps. Never address the client.\n\n"
+                + ("NOTE: you were copied VISIBLY on a client email, which breaks JRS "
+                   "policy (Joe only in BCC). The system will add a visibility alert to "
+                   "your note; do not mention it yourself and never reply in the thread.\n\n"
+                   if alerta_exposicion else "")
                 if es_observador else ""
             )
             + f"EMAIL_ID: {email_id}\n\n"
@@ -1353,6 +1374,7 @@ def procesar_un_correo(correo: dict) -> dict:
                 via=via_joe,
                 note_body=nota_params.get("body", ""),
                 note_tables=nota_params.get("tables") or [],
+                alerta=alerta_exposicion,
             )
             logger.info(f"[nota_equipo] {email_id}: {nota}")
         except Exception as e:

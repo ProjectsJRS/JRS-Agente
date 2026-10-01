@@ -2068,6 +2068,57 @@ def destinatarios_internos(from_raw: str, to_raw: str, cc_raw: str) -> list:
     return unicos
 
 
+# =====================================================
+# NUEVO (2026-10-01): POLITICA "JOE SOLO EN CCO" CON CLIENTES
+# Joe NUNCA debe ir visible (Para/CC) en un correo donde hay clientes o
+# externos. Si pasa, Joe no responde en el hilo y genera una alerta.
+# Excepcion: un externo que escribe DIRECTO a projects@ (Joe en Para) es
+# correo entrante normal del buzon y sigue el flujo de borrador.
+# =====================================================
+def analizar_visibilidad(from_raw: str, to_raw: str, cc_raw: str) -> dict:
+    from whitelist import verify_sender
+    to_l, cc_l = (to_raw or "").lower(), (cc_raw or "").lower()
+    joe_en_para = JOE_CUENTA in to_l
+    joe_en_cc = JOE_CUENTA in cc_l
+    externos, vistos = [], set()
+    for nombre, direccion in _getaddresses([from_raw or "", to_raw or "", cc_raw or ""]):
+        d = (direccion or "").strip().lower()
+        if not d or d == JOE_CUENTA or d in vistos:
+            continue
+        vistos.add(d)
+        try:
+            interno = verify_sender(f"{nombre} <{d}>" if nombre else d).get("is_internal")
+        except Exception:
+            interno = False
+        if not interno:
+            externos.append(d)
+    try:
+        remitente_interno = bool(verify_sender(from_raw or "").get("is_internal"))
+    except Exception:
+        remitente_interno = False
+    exposicion = (
+        (joe_en_para or joe_en_cc)
+        and bool(externos)
+        and not (joe_en_para and not remitente_interno)  # entrante normal al buzon
+    )
+    return {"joe_en_para": joe_en_para, "joe_en_cc": joe_en_cc,
+            "externos": externos, "remitente_interno": remitente_interno,
+            "exposicion": exposicion}
+
+
+def texto_alerta_exposicion(externos: list, via: str) -> str:
+    lista = ", ".join(externos[:6]) + (" ..." if len(externos) > 6 else "")
+    if CODIGOS_IDIOMA_AVISO == "es":
+        return (f"Joe ({JOE_CUENTA}) fue copiado de forma VISIBLE ({via}) en un correo que "
+                f"incluye direcciones externas/del cliente: {lista}. Segun la politica de JRS, "
+                f"Joe solo debe ir en CCO en correos al cliente. Quiten {JOE_CUENTA} de Para/CC "
+                f"en las proximas respuestas de este hilo. Joe no respondio a nadie en el hilo.")
+    return (f"Joe ({JOE_CUENTA}) was copied VISIBLY ({via}) on an email that includes "
+            f"client/external addresses: {lista}. Per JRS policy, Joe must only be included "
+            f"in BCC on client emails. Please remove {JOE_CUENTA} from To/CC in future "
+            f"replies on this thread. Joe did not reply to anyone on the thread.")
+
+
 def _asunto_nota_equipo(subject: str, code_check: Optional[dict]) -> str:
     referencia = _asunto_sin_corchetes(subject)
     return f"Joe | {referencia}" if referencia else "Joe | Project update"
@@ -2076,7 +2127,8 @@ def _asunto_nota_equipo(subject: str, code_check: Optional[dict]) -> str:
 def enviar_nota_equipo(subject: str, from_raw: str, to_raw: str, cc_raw: str,
                        report_text: str = "", code_check: Optional[dict] = None,
                        via: str = "", note_body: str = "",
-                       note_tables: Optional[list] = None) -> dict:
+                       note_tables: Optional[list] = None,
+                       alerta: str = "") -> dict:
     """Envia al equipo interno la nota de Joe sobre un correo observado
     (CC/CCO). Mismo formato que las respuestas internas: HTML con tablas
     reales (construir_cuerpos_correo) + texto plano alternativo.
@@ -2091,6 +2143,23 @@ def enviar_nota_equipo(subject: str, from_raw: str, to_raw: str, cc_raw: str,
         return {"sent": False, "reason": "sin destinatarios internos"}
 
     partes = []
+    if alerta:
+        # La alerta de exposicion tambien llega SIEMPRE al responsable
+        # (JOE_EQUIPO_DESTINO) y queda registrada en alerts.jsonl.
+        for d in [x.strip() for x in JOE_EQUIPO_DESTINO.split(",") if x.strip()]:
+            if d.lower() not in [u.lower() for u in destinatarios]:
+                destinatarios.append(d)
+        partes.append(f"**🚨 Visibility alert:** {alerta}")
+        try:
+            registrar_alerta(
+                severity="ATTENTION",
+                project=_asunto_sin_corchetes(subject),
+                summary="Joe copied visibly on a client email: " + alerta[:300],
+                timestamp=datetime.now().isoformat(timespec="seconds"),
+                recipients=destinatarios,
+            )
+        except Exception as e:
+            logger.warning(f"[nota_equipo] no se pudo registrar la alerta: {e}")
     aviso = (code_check or {}).get("aviso")
     if aviso:
         partes.append(f"**⚠ Project code check:** {aviso}")
@@ -2127,7 +2196,7 @@ def enviar_nota_equipo(subject: str, from_raw: str, to_raw: str, cc_raw: str,
         enviado = service.users().messages().send(userId="me", body={"raw": raw}).execute()
         logger.info(f"[nota_equipo] -> {destinatarios} (msg {enviado.get('id')}) "
                     f"via={via} code={((code_check or {}).get('code_status'))} "
-                    f"redactada={bool(note_body)}")
+                    f"redactada={bool(note_body)} alerta={bool(alerta)}")
         return {"sent": True, "to": destinatarios, "message_id": enviado.get("id")}
     except Exception as e:
         logger.error(f"[nota_equipo] fallo el envio a {destinatarios}: {e}")
