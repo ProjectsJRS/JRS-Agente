@@ -2075,44 +2075,59 @@ def _asunto_nota_equipo(subject: str, code_check: Optional[dict]) -> str:
 
 def enviar_nota_equipo(subject: str, from_raw: str, to_raw: str, cc_raw: str,
                        report_text: str = "", code_check: Optional[dict] = None,
-                       via: str = "") -> dict:
+                       via: str = "", note_body: str = "",
+                       note_tables: Optional[list] = None) -> dict:
     """Envia al equipo interno la nota de Joe sobre un correo observado
-    (CC/CCO). Incluye el aviso de codigo arriba, si lo hay."""
+    (CC/CCO). Mismo formato que las respuestas internas: HTML con tablas
+    reales (construir_cuerpos_correo) + texto plano alternativo.
+
+    - note_body/note_tables: la nota redactada por Joe (compose_team_note).
+    - report_text: respaldo si Joe no redacto la nota.
+    - El aviso de codigo lo agrega el CODIGO arriba, nunca el modelo."""
     destinatarios = destinatarios_internos(from_raw, to_raw, cc_raw)
     if not destinatarios:
         logger.warning(f"[nota_equipo] sin destinatarios internos para {subject!r}; "
                        "define JOE_EQUIPO_DESTINO. Nota no enviada.")
         return {"sent": False, "reason": "sin destinatarios internos"}
 
-    aviso = (code_check or {}).get("aviso")
     partes = []
+    aviso = (code_check or {}).get("aviso")
     if aviso:
-        partes.append(f"⚠ PROJECT CODE CHECK\n{aviso}")
-    if report_text and report_text.strip():
+        partes.append(f"**⚠ Project code check:** {aviso}")
+    if note_body and note_body.strip():
+        partes.append(note_body.strip())
+        tablas = note_tables or []
+    elif report_text and report_text.strip():
         partes.append(report_text.strip())
+        tablas = []
     else:
         partes.append("I received this email and archived it, but I could not generate "
                       "a summary. Please review the original message.")
+        tablas = []
     remitente_original = _getaddresses([from_raw or ""])
     remitente_txt = (remitente_original[0][0] or remitente_original[0][1]) if remitente_original else ""
     partes.append(
-        f"---\nOriginal email: \"{subject}\"\nFrom: {remitente_txt}\n"
-        f"Joe was on {via or 'copy'} of this email. This note is for the internal "
-        f"JRS team only and was NOT sent to the client. — Joe"
+        f"Original email: \"{subject}\" — from {remitente_txt}. Joe was on {via or 'copy'} "
+        f"of this email. This note is for the internal JRS team only and was NOT sent "
+        f"to the client."
     )
     cuerpo = "\n\n".join(partes)
 
     try:
-        service = obtener_servicio_gmail()
-        mensaje = MIMEText(cuerpo, "plain", "utf-8")
+        texto_plano, html_body = construir_cuerpos_correo(cuerpo, tablas)
+        mensaje = MIMEMultipart("alternative")
+        mensaje.attach(MIMEText(texto_plano, "plain", "utf-8"))
+        mensaje.attach(MIMEText(html_body, "html", "utf-8"))
         mensaje["to"] = destinatarios[0]
         if len(destinatarios) > 1:
             mensaje["cc"] = ", ".join(destinatarios[1:])
         mensaje["subject"] = _asunto_nota_equipo(subject, code_check)
+        service = obtener_servicio_gmail()
         raw = base64.urlsafe_b64encode(mensaje.as_bytes()).decode()
         enviado = service.users().messages().send(userId="me", body={"raw": raw}).execute()
         logger.info(f"[nota_equipo] -> {destinatarios} (msg {enviado.get('id')}) "
-                    f"via={via} code={((code_check or {}).get('code_status'))}")
+                    f"via={via} code={((code_check or {}).get('code_status'))} "
+                    f"redactada={bool(note_body)}")
         return {"sent": True, "to": destinatarios, "message_id": enviado.get("id")}
     except Exception as e:
         logger.error(f"[nota_equipo] fallo el envio a {destinatarios}: {e}")

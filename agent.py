@@ -76,7 +76,7 @@ MODELO = os.getenv("AGENT_MODEL", "claude-opus-4-8")
 # Sube este número CADA vez que despliegas. En los logs de Railway debe
 # aparecer en cada arranque y cada ciclo. Si no ves este valor, Railway está
 # corriendo una imagen CACHEADA (código viejo) — redeploy limpio.
-BUILD_VERSION = "2026-10-01_modo-observador"
+BUILD_VERSION = "2026-10-01_nota-equipo-html"
 
 SLEEP_BETWEEN_CYCLES_SECONDS = int(os.getenv("SLEEP_BETWEEN_CYCLES_SECONDS", "300"))
 MAX_EMAILS_PER_CYCLE = int(os.getenv("MAX_EMAILS_PER_CYCLE", "10"))
@@ -899,6 +899,61 @@ def leer_correos_pendientes(max_results: int = 10) -> list:
 
 
 # =====================================================
+# NUEVO (2026-10-01): COMPOSE_TEAM_NOTE (solo modo observador)
+# Joe REDACTA la nota para el equipo con el mismo estilo de sus respuestas
+# internas (saludo, resumen, tablas reales, viñetas). Esta tool NO envia
+# nada: agent.py solo captura el texto. El envio lo hace el codigo al
+# cerrar el correo, con destinatarios internos decididos por codigo,
+# correo nuevo fuera del hilo del cliente y aviso de codigo agregado arriba.
+# =====================================================
+COMPOSE_TEAM_NOTE_TOOL_DEF = {
+    "name": "compose_team_note",
+    "description": (
+        "Write the note that will be delivered to the INTERNAL JRS team about "
+        "this email. You were only on CC/BCC, so this note is the ONLY way you "
+        "respond. It is NOT sent to the client and you do NOT choose recipients: "
+        "the system delivers it automatically to the internal JRS people on this "
+        "email, as a separate email outside the client thread. Call it EXACTLY "
+        "ONCE, after generate_report. STYLE (same as your internal replies): open "
+        "addressing the internal people by first name; one or two lines with the "
+        "takeaway and risk level; then the details. Whenever there is a status "
+        "list, comparison, side-by-side or any tabular data, NEVER draw it with "
+        "dashes, pipes or spaces: put it in 'tables' and write [[TABLE 1]] (then "
+        "[[TABLE 2]] ...) on its own line in 'body' where it goes. Use '- ' for "
+        "bullets and **text** for bold. Include: open questions or requests from "
+        "the client that need a JRS answer, with a suggested answer the team can "
+        "use; risks; next steps; photos still needed. If someone asks Joe "
+        "something directly, answer it here. Sign as Joe. Do not mention the "
+        "project code check: the system adds it."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "body": {"type": "string", "description": "Full body of the note to the internal team"},
+            "tables": {
+                "type": "array",
+                "description": (
+                    "Optional tables rendered as formatted HTML inside the body. "
+                    "Table N goes where body contains [[TABLE N]]. First column = "
+                    "row label. Use 'Not reported' for missing values."
+                ),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string"},
+                        "headers": {"type": "array", "items": {"type": "string"}},
+                        "rows": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}},
+                    },
+                    "required": ["headers", "rows"],
+                },
+            },
+        },
+        "required": ["body"],
+    },
+}
+
+
+# =====================================================
 # NUEVO (2026-10-01): MODO OBSERVADOR
 # Joe es OBSERVADOR cuando su direccion NO esta en "Para" (To):
 # llego en CC o en CCO. Tipico de los hilos de proyecto con el cliente
@@ -985,7 +1040,7 @@ def procesar_un_correo(correo: dict) -> dict:
     if es_crew_update:
         tools_para_este_correo = [
             t for t in TOOLS_DEFINITION if t["name"] != "create_gmail_draft"
-        ]
+        ] + [COMPOSE_TEAM_NOTE_TOOL_DEF]  # NUEVO: redacta la nota (no envia)
         instruccion = (
             "IMPORTANT: All output must be written in English only. "
             "This is an INTERNAL CREW UPDATE data feed (Section 7.5). "
@@ -995,20 +1050,23 @@ def procesar_un_correo(correo: dict) -> dict:
             "projects in this feed; call generate_report only once. "
             "If you detect CRITICAL severity (e.g., worker injury), send the "
             "immediate alert to Richard before continuing. "
-            "Do NOT attempt to reply; this feed never gets a response and it "
-            "will be closed automatically.\n\n"
+            "Do NOT attempt to reply in the thread. Your ONLY response is "
+            "compose_team_note (call it once, after generate_report); the system "
+            "delivers it to the internal team and closes this email automatically.\n\n"
             + (
                 f"CONTEXT: You are an OBSERVER on this email (you were on {via_joe}). "
                 "It belongs to a project thread between JRS and the CLIENT: it may be "
                 "a daily report sent to the client, a client reply, or a discussion. "
                 "The subject carries the JRS Operations System project code in brackets. "
-                "It may not follow the crew update template. Your report will be "
-                "delivered AUTOMATICALLY to the internal JRS team only (never to the "
-                "client). Write it for the team: what was said and by whom, project "
-                "status and progress, decisions, open questions or requests that need "
-                "a JRS answer (include a suggested answer the team can use), risks, "
-                "and next steps. If someone asks Joe something directly, answer it in "
-                "the report. Never address the client.\n\n"
+                "It may not follow the crew update template. Steps: (1) call "
+                "generate_report ONCE (it is archived in project history); (2) call "
+                "compose_team_note ONCE with the note for the internal JRS team, in the "
+                "same style as your internal replies (greeting by first name, short "
+                "takeaway, real tables via 'tables', bullets). The note is delivered "
+                "AUTOMATICALLY to the internal team only (never to the client). Cover: "
+                "what was said and by whom, status and progress, decisions, open "
+                "questions or requests that need a JRS answer (with a suggested answer), "
+                "risks, next steps. Never address the client.\n\n"
                 if es_observador else ""
             )
             + f"EMAIL_ID: {email_id}\n\n"
@@ -1113,6 +1171,7 @@ def procesar_un_correo(correo: dict) -> dict:
     draft_id = None
     report_text = None
     report_params = {}
+    nota_params = {}  # NUEVO: nota redactada por Joe (compose_team_note)
 
     try:
         while iteraciones < MAX_ITERATIONS_PER_EMAIL:
@@ -1151,13 +1210,26 @@ def procesar_un_correo(correo: dict) -> dict:
                         tool_use_id = bloque.id
 
                         logger.info(f"  Herramienta: {nombre_tool}")
-                        resultado = ejecutar_herramienta(
-                            nombre_tool, params_tool, cc_autorizados,
-                            internal_recipient=(
-                                sender_check.get("email", "")
-                                if sender_check.get("is_internal") else ""
-                            ),
-                        )
+                        if nombre_tool == "compose_team_note":
+                            # Solo CAPTURA: no envia nada. El envio ocurre al
+                            # cerrar el correo (enviar_nota_equipo), por codigo.
+                            if es_crew_update:
+                                nota_params = params_tool or {}
+                                resultado = json.dumps({
+                                    "captured": True,
+                                    "info": "Note will be delivered automatically to "
+                                            "the internal JRS team after processing.",
+                                })
+                            else:
+                                resultado = json.dumps({"error": "compose_team_note not available"})
+                        else:
+                            resultado = ejecutar_herramienta(
+                                nombre_tool, params_tool, cc_autorizados,
+                                internal_recipient=(
+                                    sender_check.get("email", "")
+                                    if sender_check.get("is_internal") else ""
+                                ),
+                            )
 
                         # Guardar params del reporte (para la metadata de historia).
                         # Conservamos los del PRIMER generate_report; si por algo
@@ -1279,6 +1351,8 @@ def procesar_un_correo(correo: dict) -> dict:
                 report_text=report_text or "",
                 code_check=code_check,
                 via=via_joe,
+                note_body=nota_params.get("body", ""),
+                note_tables=nota_params.get("tables") or [],
             )
             logger.info(f"[nota_equipo] {email_id}: {nota}")
         except Exception as e:
