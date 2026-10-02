@@ -46,6 +46,8 @@ from tools import (
     # NUEVO (2026-10-01): politica "Joe solo en CCO" con clientes
     analizar_visibilidad,
     texto_alerta_exposicion,
+    # NUEVO (2026-10-01) Etapa 3: consulta por codigo/nombre/fecha
+    query_project_history,
     # NUEVO (2026-09-30): busqueda/lectura de la bandeja (solo lectura)
     search_inbox,
     read_email,
@@ -79,7 +81,7 @@ MODELO = os.getenv("AGENT_MODEL", "claude-opus-4-8")
 # Sube este número CADA vez que despliegas. En los logs de Railway debe
 # aparecer en cada arranque y cada ciclo. Si no ves este valor, Railway está
 # corriendo una imagen CACHEADA (código viejo) — redeploy limpio.
-BUILD_VERSION = "2026-10-01_alerta-visibilidad"
+BUILD_VERSION = "2026-10-01_consulta-proyectos"
 
 SLEEP_BETWEEN_CYCLES_SECONDS = int(os.getenv("SLEEP_BETWEEN_CYCLES_SECONDS", "300"))
 MAX_EMAILS_PER_CYCLE = int(os.getenv("MAX_EMAILS_PER_CYCLE", "10"))
@@ -562,6 +564,38 @@ SEARCH_INBOX_TOOL_DEF = {
     },
 }
 
+QUERY_PROJECT_TOOL_DEF = {
+    "name": "query_project_history",
+    "description": (
+        "Look up a PROJECT's stored daily reports in JRS project history, by project "
+        "code (format YYYYMMDD-NN, e.g. 20260910-01), by project name ('Best Buy "
+        "Carmel', 'Macy's Richmond', 'Hy-Vee West Point'), or both. Use it FIRST "
+        "whenever an internal user asks about a project's status, progress, a report "
+        "from a given day, or a period ('summary of the 29th for 20260910-01', "
+        "'how is Carmel going', 'last week at Macy's'). Pass the code if one is given, "
+        "the name if one is given (pass both if both are given). Resolve dates against "
+        "CURRENT DATE and pass YYYY-MM-DD in fecha_desde / fecha_hasta (one day = same "
+        "date in both, or only fecha_desde). The system resolves the project against "
+        "JRS Operations System: if it returns AMBIGUO or CONFLICTO, ask the user which "
+        "project — never guess. Stored dates are the day the email was PROCESSED: a "
+        "report may describe the previous day, so check the DATE inside the text. If "
+        "you need the original email or its attachments, then use search_inbox / "
+        "read_email."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "codigo": {"type": "string", "description": "Project code if given, e.g. 20260910-01"},
+            "nombre": {"type": "string", "description": "Project name or part of it, as the user wrote it"},
+            "fecha_desde": {"type": "string", "description": "YYYY-MM-DD, inclusive"},
+            "fecha_hasta": {"type": "string", "description": "YYYY-MM-DD, inclusive"},
+            "pregunta": {"type": "string", "description": "What the user wants to know, in a few words"},
+            "limite": {"type": "integer", "description": "Max reports, 1-10 (default 5)"},
+        },
+        "required": [],
+    },
+}
+
 READ_EMAIL_TOOL_DEF = {
     "name": "read_email",
     "description": (
@@ -818,6 +852,24 @@ def ejecutar_herramienta(nombre: str, parametros: dict, cc_autorizados: list = N
                     subject_contains=parametros.get("subject_contains", ""),
                     include_sent=bool(parametros.get("include_sent", False)),
                     max_results=parametros.get("max_results", 10),
+                )
+
+        elif nombre == "query_project_history":
+            # CANDADO: el historial interno solo existe para remitentes internos.
+            if not internal_recipient:
+                resultado = {"error": "query_project_history solo esta disponible para remitentes internos."}
+            else:
+                try:
+                    limite = max(1, min(10, int(parametros.get("limite") or 5)))
+                except (TypeError, ValueError):
+                    limite = 5
+                resultado = query_project_history(
+                    codigo=parametros.get("codigo", ""),
+                    nombre=parametros.get("nombre", ""),
+                    fecha_desde=parametros.get("fecha_desde", ""),
+                    fecha_hasta=parametros.get("fecha_hasta", ""),
+                    pregunta=parametros.get("pregunta", ""),
+                    limite=limite,
                 )
 
         elif nombre == "read_email":
@@ -1115,7 +1167,9 @@ def procesar_un_correo(correo: dict) -> dict:
                 t for t in tools_para_este_correo if t["name"] != "create_gmail_draft"
             ] + [SEND_INTERNAL_REPLY_TOOL_DEF,
                  # NUEVO: lectura de la bandeja, SOLO para internos.
-                 SEARCH_INBOX_TOOL_DEF, READ_EMAIL_TOOL_DEF]
+                 SEARCH_INBOX_TOOL_DEF, READ_EMAIL_TOOL_DEF,
+                 # NUEVO (Etapa 3): historial por proyecto, SOLO para internos.
+                 QUERY_PROJECT_TOOL_DEF]
             instruccion_rol = (
                 "This email is from an INTERNAL JRS decision-maker (Richard, Ralph, "
                 "Macayla, Emmanuel, or Orlando). Do NOT leave a draft and do NOT wait for "
@@ -1129,6 +1183,9 @@ def procesar_un_correo(correo: dict) -> dict:
                 "any message from an earlier date), do NOT ask them to forward it: "
                 "find it yourself with search_inbox, open it with read_email, and "
                 "answer from its actual content (Section 10.5). "
+                "For questions about a PROJECT (status, a day's report, a period), "
+                "call query_project_history FIRST with the code and/or name they "
+                "gave; if it is ambiguous, ask which project instead of guessing. "
             )
             if es_de_richard:
                 tools_para_este_correo = tools_para_este_correo + [SEND_QUOTE_TOOL_DEF]

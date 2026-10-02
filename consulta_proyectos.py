@@ -16,6 +16,12 @@ resolver_proyecto() devuelve uno de estos estados:
     NO_ENCONTRADO  -> ni codigo ni nombre coinciden (con sugerencias)
     NO_VERIFICADO  -> JRS OPS no respondio (se busca solo por texto)
 
+consultar_proyecto() agrega:
+    NO_REGISTRADO  -> el NOMBRE no esta en JRS OPS (proyecto anterior al
+                      sistema), pero si hay reportes en el historial por texto.
+                      Joe debe aclararlo al responder.
+Un CODIGO inexistente nunca se "adivina" por texto: se devuelve NO_ENCONTRADO.
+
 Fechas: el campo `date` de la historia es la fecha en que Joe PROCESO el
 correo, no el dia de trabajo. Un reporte del 28 enviado de noche queda con
 fecha 29. Por eso, al pedir un dia D, se incluyen D y D+1, marcando cual es.
@@ -48,6 +54,7 @@ AMBIGUO = "AMBIGUO"
 CONFLICTO = "CONFLICTO"
 NO_ENCONTRADO = "NO_ENCONTRADO"
 NO_VERIFICADO = "NO_VERIFICADO"
+NO_REGISTRADO = "NO_REGISTRADO"   # el nombre no esta en JRS OPS, pero hay historial
 
 COLECCION_HISTORIA = "collection_jrs_history"
 MAX_CHARS_REPORTE = 3500      # protege el contexto de Joe
@@ -316,8 +323,40 @@ def consultar_proyecto(codigo=None, nombre=None, fecha_desde=None, fecha_hasta=N
         "fechas_disponibles": [],
     }
 
-    # Ambiguo / conflicto / no encontrado: Joe debe preguntar, no adivinar.
-    if resolucion["estado"] in (AMBIGUO, CONFLICTO, NO_ENCONTRADO):
+    # Ambiguo / conflicto: Joe debe preguntar, no adivinar.
+    if resolucion["estado"] in (AMBIGUO, CONFLICTO):
+        return salida
+
+    # No encontrado: solo se busca en el historial si se dio un NOMBRE.
+    # Un codigo con error se queda en NO_ENCONTRADO (con sugerencias).
+    if resolucion["estado"] == NO_ENCONTRADO:
+        if not (nombre or "").strip():
+            return salida
+        coleccion = _coleccion or obtener_coleccion()
+        pares = _reportes_historicos(coleccion, nombre, pregunta)
+        if not pares:
+            return salida
+        desde, hasta, dia_unico = _rango(fecha_desde, fecha_hasta)
+        todas = sorted({_a_fecha((m or {}).get("date")) for _, m in pares} - {None})
+        filtrados = [(d, m) for d, m in pares
+                     if not desde or ((f := _a_fecha((m or {}).get("date"))) and desde <= f <= hasta)]
+        filtrados.sort(key=lambda x: (_a_fecha((x[1] or {}).get("date")) or date.min), reverse=True)
+        salida["resolucion"] = NO_REGISTRADO
+        salida["reportes"] = [
+            _empaquetar(d, m, "historico", dia_pedido=desde if dia_unico else None)
+            for d, m in filtrados[:max(1, int(limite or LIMITE_POR_DEFECTO))]
+        ]
+        salida["nota"] = (
+            f"'{nombre}' is NOT registered in JRS Operations System (likely a project "
+            "from before the system). These results come from project history by text "
+            "match: tell the user the project is not registered and that the data comes "
+            "from history.")
+        if desde and not salida["reportes"]:
+            antes = [f for f in todas if f < desde][-3:]
+            despues = [f for f in todas if f > hasta][:3]
+            salida["fechas_disponibles"] = [f.isoformat() for f in antes + despues]
+            salida["nota"] += (" No report in the requested dates; 'fechas_disponibles' "
+                               "lists the closest dates with reports.")
         return salida
 
     coleccion = _coleccion or obtener_coleccion()
@@ -435,6 +474,10 @@ def _autotest():
          "doc_type": "crew_update"}),                                   # historico sin codigo
         ("Old report Best Buy Waterford CT survey", {"date": "2026-09-06", "email_id": "e6",
          "doc_type": "crew_update"}),                                   # historico, otro proyecto
+        ("Hy-Vee (West Point, NE) FRP install and checkout demo", {"date": "2026-09-29",
+         "email_id": "e7", "doc_type": "crew_update"}),                 # proyecto no registrado
+        ("Hy-Vee (West Point, NE) painting and ceiling signage", {"date": "2026-09-30",
+         "email_id": "e8", "doc_type": "crew_update"}),
     ])
 
     pruebas = []
@@ -516,6 +559,23 @@ def _autotest():
     caso("28 recorta reportes muy largos", r["reportes"][0]["texto"].endswith("[...]"))
     r = C(codigo="20260910-01", fecha_desde="2026-09-30", fecha_hasta="2026-09-29")
     caso("29 fechas invertidas se corrigen", len(r["reportes"]) >= 1)
+
+    r = C(nombre="Hy-Vee West Point")
+    caso("30 nombre fuera de JRS OPS -> NO_REGISTRADO con historial",
+         r["resolucion"] == NO_REGISTRADO and len(r["reportes"]) == 2
+         and "NOT registered" in r["nota"])
+    r = C(nombre="hyvee west point", fecha_desde="2026-09-30")
+    caso("31 NO_REGISTRADO respeta la fecha",
+         r["resolucion"] == NO_REGISTRADO and len(r["reportes"]) == 1
+         and "painting" in r["reportes"][0]["texto"])
+    r = C(nombre="Hy-Vee West Point", fecha_desde="2026-09-20")
+    caso("32 NO_REGISTRADO sin reporte ese dia -> fechas cercanas",
+         not r["reportes"] and "2026-09-29" in r["fechas_disponibles"])
+    r = C(codigo="20269999-01")
+    caso("33 codigo inexistente NO busca por texto",
+         r["resolucion"] == NO_ENCONTRADO and not r["reportes"])
+    r = C(nombre="Walgreens Dallas")
+    caso("34 nombre sin historial -> NO_ENCONTRADO", r["resolucion"] == NO_ENCONTRADO)
 
     ok = sum(1 for _, p in pruebas if p)
     for n, p in pruebas:
