@@ -81,7 +81,7 @@ MODELO = os.getenv("AGENT_MODEL", "claude-opus-4-8")
 # Sube este número CADA vez que despliegas. En los logs de Railway debe
 # aparecer en cada arranque y cada ciclo. Si no ves este valor, Railway está
 # corriendo una imagen CACHEADA (código viejo) — redeploy limpio.
-BUILD_VERSION = "2026-10-01_consulta-proyectos"
+BUILD_VERSION = "2026-10-01_api-jrs-ops"
 
 SLEEP_BETWEEN_CYCLES_SECONDS = int(os.getenv("SLEEP_BETWEEN_CYCLES_SECONDS", "300"))
 MAX_EMAILS_PER_CYCLE = int(os.getenv("MAX_EMAILS_PER_CYCLE", "10"))
@@ -1779,6 +1779,26 @@ async def main():
     # NUEVO (Paso 2): crear operations.db si no existe (idempotente).
     init_operations_db()
     logger.info("operations.db listo (almacen estructurado de eventos operativos).")
+
+    # NUEVO (2026-10-01) Etapa 4: API para JRS Operations System.
+    # Corre en un HILO de este mismo proceso (un solo cliente de ChromaDB).
+    # Aislada: si falla al arrancar o despues, el agente de correo sigue.
+    try:
+        import tools as _tools_mod
+        from api import iniciar_api_en_hilo
+        iniciar_api_en_hilo({
+            "cliente": cliente,
+            "modelo": MODELO,
+            "system_prompt": SYSTEM_PROMPT,
+            "ejecutar_herramienta": ejecutar_herramienta,
+            "tool_defs": list(TOOLS_DEFINITION) + [
+                SEARCH_INBOX_TOOL_DEF, READ_EMAIL_TOOL_DEF, QUERY_PROJECT_TOOL_DEF],
+            "chroma_cliente": _tools_mod._chroma_cliente,
+            "build_version": BUILD_VERSION,
+            "fecha_actual": fecha_actual_local,
+        })
+    except Exception as e:
+        logger.error(f"[api] no se pudo iniciar (el agente sigue): {e}", exc_info=True)
 
     consecutive_failures = 0
 
