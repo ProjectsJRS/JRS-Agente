@@ -2121,7 +2121,9 @@ def texto_alerta_exposicion(externos: list, via: str) -> str:
 
 def _asunto_nota_equipo(subject: str, code_check: Optional[dict]) -> str:
     referencia = _asunto_sin_corchetes(subject)
-    return f"Joe | {referencia}" if referencia else "Joe | Project update"
+    # CAMBIO (2026-10-04): prefijo "Daily report analysis |" en vez de "Joe |".
+    return (f"Daily report analysis | {referencia}" if referencia
+            else "Daily report analysis | Project update")
 
 
 def enviar_nota_equipo(subject: str, from_raw: str, to_raw: str, cc_raw: str,
@@ -2160,9 +2162,9 @@ def enviar_nota_equipo(subject: str, from_raw: str, to_raw: str, cc_raw: str,
             )
         except Exception as e:
             logger.warning(f"[nota_equipo] no se pudo registrar la alerta: {e}")
+    # CAMBIO (2026-10-04): el aviso de codigo ya NO va arriba con alarma;
+    # va al final como nota simple (ver mas abajo).
     aviso = (code_check or {}).get("aviso")
-    if aviso:
-        partes.append(f"**⚠ Project code check:** {aviso}")
     if note_body and note_body.strip():
         partes.append(note_body.strip())
         tablas = note_tables or []
@@ -2173,6 +2175,8 @@ def enviar_nota_equipo(subject: str, from_raw: str, to_raw: str, cc_raw: str,
         partes.append("I received this email and archived it, but I could not generate "
                       "a summary. Please review the original message.")
         tablas = []
+    if aviso:
+        partes.append(f"Note: {aviso}")
     remitente_original = _getaddresses([from_raw or ""])
     remitente_txt = (remitente_original[0][0] or remitente_original[0][1]) if remitente_original else ""
     partes.append(
